@@ -27,7 +27,7 @@ except OSError:
 cfg = {
     'file_path': 'profiles',
     'passphrase': '',
-    'logfile': '/home/tk/code/profiler/log',
+    'logfile': '/var/log/sshc',
     'templ_list': {},
     'default_templ': '',
     'keys_path': '',
@@ -174,11 +174,13 @@ def main(scr, entrymessage=None):
             params += '\n'
         return params
 
-    def print_message(message_text, offset=tabsize):
+    def print_message(message_text, offset=tabsize, voffset=0):
         conn = profiles[resolve('conn')]
         print_point = len(conn.expandtabs().rstrip()) + offset
         if nodetails:
             print_point = len('\t'.join(conn.split('\t')[:3]).expandtabs().rstrip()) + offset 
+        if isinstance(message_text, list):
+            message_text = ' \n'.join(message_text)
 
         if len(message_text) + print_point > width - 15 or '\n' in message_text:    # If message does not visually fits in single line, put it into a rectangled window  
             redraw(pos)                                                             # and remove the details of surrounding connections if nodetails is set
@@ -199,12 +201,12 @@ def main(scr, entrymessage=None):
                 lines[linenum] += word + ' '
  
             message_text = '\n'.join(lines)
-            msgwin = curses.newwin(message_text.count('\n') + 1, 80, pos, print_point)
+            msgwin = curses.newwin(message_text.count('\n') + 1, 80, pos + voffset, print_point)
             msgwin.addstr(message_text)
             msgwin.refresh()
             return
         
-        scr.addstr(pos, print_point, message_text)
+        scr.addstr(pos + voffset, print_point, message_text)
         scr.refresh()
 
 
@@ -243,6 +245,21 @@ def main(scr, entrymessage=None):
                 continue
             name = actualname
         return name
+
+    def autocomplete(path):     # path considered to be uncompleted
+        splited = path.split('/')
+        file = splited[-1]
+        path = '/'.join(splited[:-1]) + '/'
+        suggestions = [f for f in os.listdir(path) if re.match(rf'{file}.*', f)]
+        if len(suggestions) > 0:
+            for pos, char in enumerate(sorted(suggestions, key=len)[0], 0):
+                if len(suggestions) == len([sug for sug in suggestions if sug[pos] == char]):
+                    path += char
+                    continue
+                break
+        else:
+            path, suggestions = autocomplete(path + file[:-1])
+        return path, suggestions
 
     def continuous_print(stop):
         def tailf():
@@ -374,7 +391,7 @@ def main(scr, entrymessage=None):
                         break
                     sleep(0.01)
                 else:
-                    break   # If timeout occured, do not attempt to send the rest of the keys
+                    break   # If timeout occured, do not to send the rest
                 continue
 
             pane.cmd('send-keys', command + '\n')
@@ -662,7 +679,7 @@ def main(scr, entrymessage=None):
                     pthread.daemon = True
                     pthread.start()
 
-                case 20:        # Ctrl+T - Create a background process for tunneling
+                case 0:        # Ctrl+T - Create a background process for tunneling
                     pass
 
 
@@ -678,75 +695,59 @@ def main(scr, entrymessage=None):
                     action = 'to'
                     if keypress == 6:
                         action = 'from'
-                    scripts_count = len(cfg[f'{action}_scripts']) 
 
-                    if scripts_count == 0:
-                        print_message(f'No scripts for uploading {action} were found, or ~/.sshc/{action}_scripts directory is missing')
-                        continue
-
-                    if scripts_count == 1:
-                        chosen_script = cfg[f'{action}_scripts'][0]
-                    else:
-                        scripts_str = ''.join([str(num) + ' - ' + script + '\n' for num, script in enumerate(cfg[f'{action}_scripts'], 1)]).strip()
-                        print_message('Enter a number from range of available scripts:\n' + scripts_str)
+                    options = ['1 - Automatic upload (based on the connection details)'] + [str(num) + ' - ' + script for num, script in enumerate(cfg[f'{action}_scripts'], 2)]
+                    option = 1
+                    if len(options) > 1:
+                        print_message(['Enter a number from the list of available options:'] + options)
                         keypress = scr.getch()
                         redraw(pos)
-                        if keypress not in list(range(48, 58)):
-                            print_message('Not a number was entered')
+                        if keypress not in list(range(49, 49 + len(options))):
+                            print_message('A key out of range of available options was entered')
                             continue
+                        option = int(chr(keypress))
 
-                        keypress = int(chr(keypress))
-                        if keypress not in range(1, len(cfg['from_scripts']) + 1):
-                            print_message(f'No such script for entered number - {keypress}')
-                            continue
-                        chosen_script = cfg[f'{action}_scripts'][keypress - 1]
-
-                    if action == 'to':  # sort of autocompletion, but on enter (would be better on steroids..)
-                        file_path = cfg[f'upload_{action}_path'] + '/'
+                    if action == 'to':
+                        filename = ''
+                        path = cfg['upload_to_path'] + '/'
                         while True:
-                            file_name = accept_input(message=f'Enter a filename to be uploaded {action} host using {chosen_script} - ', preinput=file_path)
-                            if file_name is None or os.path.isfile(file_name):
+                            filename = accept_input(message=f'Enter a filename to be uploaded to host - ', preinput=path)
+                            if filename is None or os.path.isfile(filename):
                                 break
-                            if '/' not in file_name:
-                                print_message('\n\nSomething unfile-ish was given, try again or give up')
+                            path, suggestions = autocomplete(filename)
+                            if path.endswith('/'):
+                                suggestions = [s for s in suggestions if not s.startswith('.')]
+                            if len(suggestions) == 1:
+                                if os.path.isdir(path):
+                                    path += '/'
                                 continue
-
-                            if os.path.isdir(file_name):
-                                partial_name = ''
-                                dir_path = file_name
-                            else:
-                                partial_name = file_name.split('/')[-1]
-                                dir_path = file_name[:(len(partial_name)) * -1]
-
-                            try:
-                                matched_files = [file for file in os.listdir(dir_path) if re.match(rf'{partial_name}.*', file)]
-                            except Exception:
-                                print_message('\n\nCan\'t read given directory')
-                                continue
-                            if len(matched_files) == 1:
-                                file_path = '/'.join(file_name.split('/')[:-1]) + '/' + matched_files[0]
-                                continue
-                            elif len(matched_files) > 1:
-                                print_message('\n\nMatching files:\n' + '\n'.join(matched_files))
-                                file_path = file_name
-                            else:
-                                print_message('\n\nNo such file and nothing to complete')
+                            niceoffset = len(f'Enter a filename to be uploaded to host - ') + len('/'.join(path.split('/')[:-1])) + 1
+                            print_message(suggestions, offset=tabsize + niceoffset, voffset=1)
 
                     else:
-                        file_name = accept_input(message=f'Enter a filename to be uploaded {action} host using {chosen_script} - ', preinput=cfg[f'upload_{action}_path'] + '/')
-                    
-                    if file_name is None:
-                        nodetails = False
+                        filename = accept_input(message=f'Enter a filename to be uploaded from host - ', preinput=cfg[f'upload_from_path'] + '/')
+                    if filename is None:
                         redraw(pos)
-                        continue
+                        continue 
+
                     try:
-                        host_params = conn_params()
+                        hp = conn_params()  # hp - host parameters
                     except Exception:
                         print_message(f'There is an error with the connection parsing\n\n{traceback.format_exc()}')
                         continue
-                    print_message('Ctrl+L for details of script execution')
-                    Popen([f'{user_folder}/{action}_scripts/{chosen_script}', host_params['address'],
-                                  str(host_params['port']), str(host_params['key']), f'"{host_params["pass"]}"', str(host_params["user"]), str(file_name)], stdout=log, stderr=log)
+
+                    if option == 1:
+                        cmd = f'-P {hp["port"]} {hp["user"]}@{hp["address"]}:'
+                        if hp['pass'] is not None:
+                            pass    # write a catcher for the password prompt
+                        if hp['key'] is not None:
+                            cmd = '-i {hp["key"]} ' + cmd
+                        cmd = 'scp ' + cmd
+
+                    else:
+                        chosen_script = cfg[f'{action}_scripts'][option - 2]
+                        Popen([f'{user_folder}/{action}_scripts/{chosen_script}', hp['address'],
+                                      str(hp['port']), str(hp['key']), f'"{hp["pass"]}"', str(hp["user"]), str(file_name)], stdout=log, stderr=log)
 
                 case 534:   # Ctrl+↓ for moving connections inside profile
                     if not nested:
@@ -778,7 +779,7 @@ def main(scr, entrymessage=None):
                     if not nested:
                         continue
                     try:
-                        cmds = str(conn_params(commands=True))
+                        cmds = conn_params(commands=True)
                     except Exception:
                         print_message(f'There is an error with the connection parsing\n\n{traceback.format_exc()}')
                         continue
@@ -931,9 +932,4 @@ signal.signal(signal.SIGUSR2, macros)
 
 if __name__ == '__main__':
     entrymessage = 'test entry message'
-    while True:
-        try:
-            curses.wrapper(main, entrymessage)
-        except Exception:
-            wrt(traceback.format_exc())
-            entrymessage = 'There was an error, that is not blessed with propper handling and program was reset (all changes saved)'
+    curses.wrapper(main, entrymessage)

@@ -246,20 +246,36 @@ def main(scr, entrymessage=None):
             name = actualname
         return name
 
-    def autocomplete(path):     # path considered to be uncompleted
-        splited = path.split('/')
-        file = splited[-1]
-        path = '/'.join(splited[:-1]) + '/'
+    def autocomplete(path):
+        def addslash(s):
+            if os.path.isdir(path[:path.rfind('/') + 1] + s) and not s.endswith('/'):
+                return s + '/'
+            return s
+        
+        if len(path) == 0:
+            path = '/'
+        file = path[path.rfind('/') + 1:]
+        path = path[:path.rfind('/') + 1]
+        if not os.access(path, os.R_OK):
+            return path, ['can not access the directory']
         suggestions = [f for f in os.listdir(path) if re.match(rf'{file}.*', f)]
-        if len(suggestions) > 0:
+        wrt(file, path, suggestions)
+        if len(suggestions) > 1:
             for pos, char in enumerate(sorted(suggestions, key=len)[0], 0):
                 if len(suggestions) == len([sug for sug in suggestions if sug[pos] == char]):
                     path += char
                     continue
                 break
+        elif len(suggestions) == 1:
+            if not os.path.isdir(path + suggestions[0]):
+                return path + suggestions[0], []
+            path, suggestions = autocomplete(path + suggestions[0] + '/')
         else:
+            if len(os.listdir(path)) == 0:
+                return path, ['directory is empty']
             path, suggestions = autocomplete(path + file[:-1])
-        return path, suggestions
+
+        return path, list(map(addslash, suggestions))
 
     def continuous_print(stop):
         def tailf():
@@ -717,10 +733,6 @@ def main(scr, entrymessage=None):
                             path, suggestions = autocomplete(filename)
                             if path.endswith('/'):
                                 suggestions = [s for s in suggestions if not s.startswith('.')]
-                            if len(suggestions) == 1:
-                                if os.path.isdir(path):
-                                    path += '/'
-                                continue
                             niceoffset = len(f'Enter a filename to be uploaded to host - ') + len('/'.join(path.split('/')[:-1])) + 1
                             print_message(suggestions, offset=tabsize + niceoffset, voffset=1)
 

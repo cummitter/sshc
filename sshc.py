@@ -258,8 +258,10 @@ def main(scr, entrymessage=None):
         path = path[:path.rfind('/') + 1]
         if not os.access(path, os.R_OK):
             return path, ['can not access the directory']
-        suggestions = [f for f in os.listdir(path) if re.match(rf'{file}.*', f)]
-        wrt(file, path, suggestions)
+ 
+        suggestions = [f for f in os.listdir(path) if re.match(rf'{file}.*', f) and not f.startswith('.')]
+        if file.startswith('.'):
+            suggestions = [f for f in os.listdir(path) if re.match(rf'{file}.*', f) and f.startswith('.')]
         if len(suggestions) > 1:
             for pos, char in enumerate(sorted(suggestions, key=len)[0], 0):
                 if len(suggestions) == len([sug for sug in suggestions if sug[pos] == char]):
@@ -276,6 +278,15 @@ def main(scr, entrymessage=None):
             path, suggestions = autocomplete(path + file[:-1])
 
         return path, list(map(addslash, suggestions))
+
+    def autocomplete_loop(msg, path):
+        while True:
+            filename = accept_input(message=msg, preinput=path)
+            if filename is None or os.path.isfile(filename):
+                return filename
+            path, suggestions = autocomplete(filename)
+            print_message(suggestions, offset=tabsize + len(msg) + len(path[:path.rfind('/') + 1]), voffset=1)
+
 
     def continuous_print(stop):
         def tailf():
@@ -705,6 +716,7 @@ def main(scr, entrymessage=None):
 
                 case 6 | 20:    # Ctrl+F or Ctrl+T for uploading files from or to host
                     if not nested:
+                        print_message('File uploading supported for single host at a time, sry(')
                         continue
 
                     nodetails = True
@@ -719,26 +731,16 @@ def main(scr, entrymessage=None):
                         keypress = scr.getch()
                         redraw(pos)
                         if keypress not in list(range(49, 49 + len(options))):
-                            print_message('A key out of range of available options was entered')
+                            print_message('Entered key out of range of available options')
                             continue
                         option = int(chr(keypress))
 
                     if action == 'to':
-                        filename = ''
-                        path = cfg['upload_to_path'] + '/'
-                        while True:
-                            filename = accept_input(message=f'Enter a filename to be uploaded to host - ', preinput=path)
-                            if filename is None or os.path.isfile(filename):
-                                break
-                            path, suggestions = autocomplete(filename)
-                            if path.endswith('/'):
-                                suggestions = [s for s in suggestions if not s.startswith('.')]
-                            niceoffset = len(f'Enter a filename to be uploaded to host - ') + len('/'.join(path.split('/')[:-1])) + 1
-                            print_message(suggestions, offset=tabsize + niceoffset, voffset=1)
-
+                        filename = autocomplete_loop('Enter a filename to be uploaded to host - ', cfg['upload_to_path'] + '/')
                     else:
                         filename = accept_input(message=f'Enter a filename to be uploaded from host - ', preinput=cfg[f'upload_from_path'] + '/')
                     if filename is None:
+                        nodetails = False
                         redraw(pos)
                         continue 
 

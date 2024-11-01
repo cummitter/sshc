@@ -8,9 +8,9 @@ import libtmux
 import signal
 import warnings
 import threading
+import subprocess
 from base64 import b64decode as dcd
 from gnupg import GPG
-from subprocess import Popen
 from textpad import Textbox
 from time import sleep, time
 warnings.filterwarnings("ignore")
@@ -41,6 +41,7 @@ cfg = {
     'to_scripts': [],
     'upload_from_path': '',
     'upload_to_path': '',
+    'upload_from_dest': os.path.expanduser('~'),
     'new_profile': ['New profile\n', '\tnew\t10.100.0.0\n']
 }
 
@@ -183,7 +184,7 @@ def main(scr, entrymessage=None):
             message_text = ' \n'.join(message_text)
 
         if len(message_text) + print_point > width - 15 or '\n' in message_text:    # If message does not visually fits in single line, put it into a rectangled window  
-            redraw(pos)                                                             # and remove the details of surrounding connections if nodetails is set
+            redraw()                                                                # and remove the details of surrounding connections if nodetails is set
             lines = ['']
             linenum = 0
             for word in message_text.split(' '):
@@ -223,10 +224,10 @@ def main(scr, entrymessage=None):
         scr.refresh()
         box = Textbox(editwin, insert_mode=True)
         if box.edit() is None:  # editing was canceled, no changes needs to be applied
-            redraw(pos)
+            redraw()
             curses.curs_set(0)
             return
-        redraw(pos)
+        redraw()
         curses.curs_set(0)
         return box.gather()[:-1]
 
@@ -423,7 +424,9 @@ def main(scr, entrymessage=None):
 
             pane.cmd('send-keys', command + '\n')
 
-    def redraw(y_pos):
+    def redraw(y_pos=None):
+        if y_pos is None:
+            y_pos = pos
         scr.erase()
         print_profiles(y_pos)
         scr.addstr(bottom - 2, 4, f'Sort by {sort}.*')
@@ -517,7 +520,7 @@ def main(scr, entrymessage=None):
                     if nested:
                         if nested_pos in picked_cons:
                             picked_cons.remove(nested_pos)
-                            redraw(pos)
+                            redraw()
                         else:
                             nested = 0
                             picked_cons = set()
@@ -534,7 +537,7 @@ def main(scr, entrymessage=None):
                         redraw(pos + 1)
                     else:
                         picked_cons.add(nested_pos)
-                        redraw(pos)
+                        redraw()
 
 
                 case 10:    # Enter spawns new tmux windows and sends connection commands to them
@@ -569,7 +572,7 @@ def main(scr, entrymessage=None):
                     except libtmux.exc.LibTmuxException:    # All created panes were killed and no window remained
                         pass
                     picked_cons = set()
-                    redraw(pos)
+                    redraw()
                     print_message(error_message)
 
                 case 5: # Ctrl+E for editing a string where cursor at
@@ -600,7 +603,7 @@ def main(scr, entrymessage=None):
                             newline = unique_name(newline)
 
                     profiles[replace_line] = newline + '\n'
-                    redraw(pos)
+                    redraw()
 
 
                 case 14:    # Ctrl+N for adding new profiles and servers
@@ -627,7 +630,7 @@ def main(scr, entrymessage=None):
                         if pos - conn_count == highlstr:  # if removed host was last in the list
                             redraw(pos - 1)
                         else:
-                            redraw(pos)
+                            redraw()
                     else:
                         remove_start_point = resolve('prof')
                         remove_end_point = 0 
@@ -670,23 +673,30 @@ def main(scr, entrymessage=None):
                         for num in range(1, conn_count + 1):
                             if not profiles[profindex + num].strip().startswith('#'):
                                 picked_cons.add(num)
-                        redraw(pos)
+                        redraw()
 
 
                 case 21:        # Ctrl+U - Upload(?) a profile from file (only IPs) 
-                    path = accept_input(message='File to take IPs from - ', preinput=f"{cfg['import_path']}/")
-                    if path is None:
+                    filename = autocomplete_loop('File to take IPs from - ', cfg['import_path'] + '/')
+                    if filename is None:
                         continue
                     try:
-                        file = open(path)
-                    except OSError:
+                        file = open(filename)
+                        ips = sorted(set(re.findall(r'\d{,3}\.\d{,3}\.\d{,3}\.\d{,3}', file.read())))
+                    except Exception:
                         print_message(f'Could not open or read given file - {path}')
                         continue
-                    ips = sorted(set(re.findall(r'\d{,3}\.\d{,3}\.\d{,3}\.\d{,3}', file.read())))
-                    filename = path.split('/')[-1]
-                    profname = filename[:filename.find('.')]
+
+                    if len(ips) == 0:
+                        print_message('Could not find any IP addresses in the file')
+                        continue
+
+                    profname = filename[filename.rfind('/') + 1:]
+                    if '.' in profname:
+                        profname = profname[:profname.find('.')]
+
                     if len(cfg['default_templ']) > 0:
-                        profname = f'{profname}\t{cfg["default_templ"]}'
+                        profname += f'\t{cfg["default_templ"]}'
                     newprof = [unique_name(profname) + '\n']
                     for ind, ip in enumerate(ips):
                         newprof.append(f'\thost_{str(ind).zfill(2)}\t{ip}\n')
@@ -700,7 +710,7 @@ def main(scr, entrymessage=None):
                 
                 case 12:        # Ctrl+L - Create a continuously updating window with the log file contents in it
                     nodetails = True
-                    redraw(pos)
+                    redraw()
                     stop_printing = False
                     pthread = threading.Thread(target=continuous_print, args=[lambda: stop_printing])
                     pthread.daemon = True
@@ -729,7 +739,7 @@ def main(scr, entrymessage=None):
                     if len(options) > 1:
                         print_message(['Enter a number from the list of available options:'] + options)
                         keypress = scr.getch()
-                        redraw(pos)
+                        redraw()
                         if keypress not in list(range(49, 49 + len(options))):
                             print_message('Entered key out of range of available options')
                             continue
@@ -741,7 +751,7 @@ def main(scr, entrymessage=None):
                         filename = accept_input(message=f'Enter a filename to be uploaded from host - ', preinput=cfg[f'upload_from_path'] + '/')
                     if filename is None:
                         nodetails = False
-                        redraw(pos)
+                        redraw()
                         continue 
 
                     try:
@@ -751,16 +761,28 @@ def main(scr, entrymessage=None):
                         continue
 
                     if option == 1:
-                        cmd = f'-P {hp["port"]} {hp["user"]}@{hp["address"]}:'
-                        if hp['pass'] is not None:
-                            pass    # write a catcher for the password prompt
+                        src, dst = filename, f'{hp["user"]}@{hp["address"]}:'
+                        if action == 'from':
+                            src, dst = f'{hp["user"]}@{hp["address"]}:{filename}', cfg['upload_from_dest']
+
+                        scp_options = f'-P {hp["port"]}'
                         if hp['key'] is not None:
-                            cmd = '-i {hp["key"]} ' + cmd
-                        cmd = 'scp ' + cmd
+                            scp_options += f' -i {hp["key"]}'
+                        if hp['pass'] is not None:
+                            pass
+
+                        scp = f'scp -v {scp_options} {src} {dst}'
+                        print_message(scp)
+                        proc = subprocess.Popen(scp.split(' '), stdout=subprocess.PIPE, stdin=subprocess.PIPE, stderr=subprocess.STDOUT)
+                        while True:
+                            stdout = proc.communicate()[0]
+                            if len(stdout) > 0:
+                                wrt(stdout)
+                            sleep(0.1)
 
                     else:
                         chosen_script = cfg[f'{action}_scripts'][option - 2]
-                        Popen([f'{user_folder}/{action}_scripts/{chosen_script}', hp['address'],
+                        subprocess.Popen([f'{user_folder}/{action}_scripts/{chosen_script}', hp['address'],
                                       str(hp['port']), str(hp['key']), f'"{hp["pass"]}"', str(hp["user"]), str(file_name)], stdout=log, stderr=log)
 
                 case 534:   # Ctrl+↓ for moving connections inside profile
@@ -797,6 +819,8 @@ def main(scr, entrymessage=None):
                     except Exception:
                         print_message(f'There is an error with the connection parsing\n\n{traceback.format_exc()}')
                         continue
+                    nodetails = True
+                    redraw()
                     print_message(cmds)
 
                 case 263:   # backspace removes characters from sorting string
@@ -823,10 +847,13 @@ def main(scr, entrymessage=None):
                         continue
             
         except curses.error:
-            redraw(pos)
+            redraw()
             print_message('There was a not-so critical error with displaying a text')
             wrt(traceback.format_exc())
-            continue
+        except Exception:
+            redraw(0)
+            print_message('There was a relatively critical error, details of which were written to a log')
+            wrt(traceback.format_exc())
 
 
 def new_win(name):

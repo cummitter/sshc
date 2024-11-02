@@ -9,7 +9,6 @@ import signal
 import warnings
 import threading
 import subprocess
-from base64 import b64decode as dcd
 from gnupg import GPG
 from textpad import Textbox
 from time import sleep, time
@@ -100,7 +99,7 @@ def main(scr, entrymessage=None):
     global conn_params
     global create_connection
     global nodetails
-    global pthread
+    stop_print = threading.Event()
     nodetails = False
     tabsize = curses.get_tabsize()
     bottom, width = scr.getmaxyx()
@@ -289,10 +288,39 @@ def main(scr, entrymessage=None):
             print_message(suggestions, offset=tabsize + len(msg) + len(path[:path.rfind('/') + 1]), voffset=1)
 
 
-    def continuous_print(stop):
+    # war crime happenning. Did not found, or researched enough, to come with a smarter solution
+    # function forks a process (with a pty), immediatly gives it a command to execute and starts a thread
+    # for reading an output and optionaly reacting to it with a certain input (passwords)
+    def proc_handler(cmd, args, waitfor=None):
+        def thr_handler(fd, pid, waitfor):
+            while True:
+                try:
+                    os.waitpid(pid, os.WNOHANG)
+                    out = os.read(fd, 1024)
+                except (ChildProcessError, OSError):
+                    break
+                wrt(f'[PID - {pid}]' + out.decode())
+                if b'word:' in out and waitfor is not None:
+                    os.write(fd, f'{waitfor}\n'.encode())
+                    waitfor = None
+                sleep(0.1)
+        
+        pid, fd = os.forkpty()
+        if pid == 0:
+            os.execvp(cmd, args)
+        elif pid > 0:
+            threading.Thread(target=thr_handler, args=[fd, pid, waitfor]).start()
+
+    def tailing_print():
+        nodetails = True
+        redraw()
+        stop_print.clear()
+        threading.Thread(target=__continuous_print, daemon=True).start()
+
+    def __continuous_print():
         def tailf():
             l = open(cfg['logfile'])
-            while not stop():
+            while not stop_print.is_set():
                 line = l.readline()
                 if not line or not line.endswith('\n'):
                     sleep(0.01)
@@ -444,13 +472,11 @@ def main(scr, entrymessage=None):
         if entrymessage:
             print_message(entrymessage)
             entrymessage = None
-        keypress = scr.getch()
-        
-        for thr in threading.enumerate():           # Making sure to kill a printing thread if there is one
-            if 'continuous_print' in thr.name:
-                stop_printing = True
-                pthread.join()
+        keypress = scr.getch() 
 
+        if 'print' in str(threading.enumerate()):
+            stop_print.set()
+            [th for th in threading.enumerate() if 'print' in th.name][0].join()
         if profiles_count == 0 and keypress in [258, 259, 260, 261]:
             continue
         
@@ -682,13 +708,14 @@ def main(scr, entrymessage=None):
                         continue
                     try:
                         file = open(filename)
-                        ips = sorted(set(re.findall(r'\d{,3}\.\d{,3}\.\d{,3}\.\d{,3}', file.read())))
+                        ips = sorted(set(re.findall(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}', file.read())))
                     except Exception:
-                        print_message(f'Could not open or read given file - {path}')
+                        print_message(f'Could not open or read given file')
                         continue
 
                     if len(ips) == 0:
                         print_message('Could not find any IP addresses in the file')
+                        file.close()
                         continue
 
                     profname = filename[filename.rfind('/') + 1:]
@@ -702,6 +729,7 @@ def main(scr, entrymessage=None):
                         newprof.append(f'\thost_{str(ind).zfill(2)}\t{ip}\n')
 
                     profiles = newprof + profiles
+                    file.close()
                     nested = 0
                     highlstr = 0
                     top_displayed = 0
@@ -709,12 +737,7 @@ def main(scr, entrymessage=None):
 
                 
                 case 12:        # Ctrl+L - Create a continuously updating window with the log file contents in it
-                    nodetails = True
-                    redraw()
-                    stop_printing = False
-                    pthread = threading.Thread(target=continuous_print, args=[lambda: stop_printing])
-                    pthread.daemon = True
-                    pthread.start()
+                    tailing_print()
 
                 case 0:        # Ctrl+T - Create a background process for tunneling
                     pass
@@ -768,22 +791,15 @@ def main(scr, entrymessage=None):
                         scp_options = f'-P {hp["port"]}'
                         if hp['key'] is not None:
                             scp_options += f' -i {hp["key"]}'
-                        if hp['pass'] is not None:
-                            pass
 
-                        scp = f'scp -v {scp_options} {src} {dst}'
-                        print_message(scp)
-                        proc = subprocess.Popen(scp.split(' '), stdout=subprocess.PIPE, stdin=subprocess.PIPE, stderr=subprocess.STDOUT)
-                        while True:
-                            stdout = proc.communicate()[0]
-                            if len(stdout) > 0:
-                                wrt(stdout)
-                            sleep(0.1)
+                        wrt(f'The following command will be started - scp {scp_options} {src} {dst}')
+                        proc_handler('scp', [scp_options, src, dst], hp['pass'])
 
                     else:
                         chosen_script = cfg[f'{action}_scripts'][option - 2]
                         subprocess.Popen([f'{user_folder}/{action}_scripts/{chosen_script}', hp['address'],
-                                      str(hp['port']), str(hp['key']), f'"{hp["pass"]}"', str(hp["user"]), str(file_name)], stdout=log, stderr=log)
+                                      str(hp['port']), str(hp['key']), f'"{hp["pass"]}"', str(hp["user"]), str(filename)], stdout=log, stderr=log)
+                    tailing_print()
 
                 case 534:   # Ctrl+↓ for moving connections inside profile
                     if not nested:

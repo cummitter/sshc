@@ -949,8 +949,14 @@ def neighbors(signal, frame):
         return 0
 
     if signal == 29:    # SIGPOLL
-        create_connection(pane.split_window(), int(sesh.show_environment()['neighbor']) + 1, index)
-        sesh.remove_environment('neighbor')
+        try:
+            pane = pane.split_window()
+            create_connection(pane, int(sesh.show_environment()['neighbor']) + 1, index)
+            pane.select()
+            sesh.remove_environment('neighbor')
+        except Exception:
+            pane.kill()
+            os.system(f"tmux display-message -d 3000 'Could not parse chosen host configuration' 2>/dev/null")
 
 def macros(signal, frame):
 

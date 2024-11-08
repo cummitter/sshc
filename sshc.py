@@ -9,10 +9,19 @@ import signal
 import warnings
 import threading
 import subprocess
+import socket
 from gnupg import GPG
 from textpad import Textbox
 from time import sleep, time
 warnings.filterwarnings("ignore")
+
+
+def wrt(*values, ex=False):
+    for value in values:
+        log.write(str(value) + '\n')
+    log.flush()
+    if ex:
+        exit()
 
 
 user_folder = os.path.expanduser('~') + '/.sshc'
@@ -41,6 +50,8 @@ cfg = {
     'upload_from_path': '',
     'upload_to_path': '',
     'upload_from_dest': os.path.expanduser('~'),
+    'src_tunnel_port': '8080',
+    'dst_tunnel_port': '1521',
     'new_profile': ['New profile\n', '\tnew\t10.100.0.0\n']
 }
 
@@ -110,7 +121,7 @@ def main(scr, entrymessage=None):
     picked_cons = set()
 
     # The only function responsible for printing everything displayed in the screen, called only in redraw()
-    # It is prooved to be easier to redraw everything with each motion
+    # It has been proved to be easier to redraw everything with each motion
     def print_profiles(move):
         global profiles_count
         global conn_count
@@ -295,9 +306,8 @@ def main(scr, entrymessage=None):
         def thr_handler(fd, pid, waitfor):
             while True:
                 try:
-                    os.waitpid(pid, os.WNOHANG)
                     out = os.read(fd, 1024)
-                except (ChildProcessError, OSError):
+                except (OSError):
                     break
                 wrt(f'[PID - {pid}]' + out.decode())
                 if b'word:' in out and waitfor is not None:
@@ -736,12 +746,51 @@ def main(scr, entrymessage=None):
                     redraw(0)
 
                 
-                case 12:        # Ctrl+L - Create a continuously updating window with the log file contents in it
+                case 16:        # Ctrl+P - Create a continuously updating window with the log file contents in it
                     tailing_print()
 
-                case 0:        # Ctrl+T - Create a background process for tunneling
-                    pass
+                case 12:        # Ctrl+L - Create a background process for tunneling
+                    defaultport = cfg["src_tunnel_port"]
+                    sport = accept_input(message=f'Source port - empty for default {defaultport} and try to increase if already in use or 0 for random: ')
+                    if sport is None:
+                        continue
+                    if sport == '':
+                        sport = defaultport
+                    if not sport.isdigit():
+                        print_message('Entered value is not a number')
+                        continue
+                    sport = int(sport)
+                    if sport > 65535:
+                        print_message('Entered port out of range of available ports')
+                        continue
+                    
+                    for num in range(0, 65535 - int(sport)):
+                        try:
+                            s = socket.socket()
+                            s.bind(('', sport + num))
+                            port = s.getsockname()[1]
+                            s.close()
+                            break
+                        except OSError:
+                            continue
 
+                    defaultport = cfg["dst_tunnel_port"]
+                    print_message(f'Source port - {sport}', voffset=1)
+                    dport = accept_input(message=f'Destination port (empty for default {defaultport}) - ')
+                    
+                    if dport is None:
+                        continue
+                    if dport == '':
+                        dport = defaultport
+                    if not dport.isdigit():
+                        print_message('Entered value is not a number')
+                        continue
+                    dport = int(dport)
+                    if dport > 65535:
+                        print_message('Entered port out of range of available ports')
+                        continue
+
+                    print_message(f'Chosen ports - {sport} and {dport}')
 
                 case 11:        # Ctrl+K - Put an identity file in remote host's authorized_keys (should work only if password is defined for connection)
                     pass
@@ -771,7 +820,7 @@ def main(scr, entrymessage=None):
                     if action == 'to':
                         filename = autocomplete_loop('Enter a filename to be uploaded to host - ', cfg['upload_to_path'] + '/')
                     else:
-                        filename = accept_input(message=f'Enter a filename to be uploaded from host - ', preinput=cfg[f'upload_from_path'] + '/')
+                        filename = accept_input(message='Enter a filename to be uploaded from host - ', preinput=cfg[f'upload_from_path'] + '/')
                     if filename is None:
                         nodetails = False
                         redraw()
@@ -792,7 +841,7 @@ def main(scr, entrymessage=None):
                         if hp['key'] is not None:
                             scp_options += f' -i {hp["key"]}'
 
-                        wrt(f'The following command will be started - scp {scp_options} {src} {dst}')
+                        wrt(f'The following command will be executed - scp {scp_options} {src} {dst}')
                         proc_handler('scp', [scp_options, src, dst], hp['pass'])
 
                     else:
@@ -876,15 +925,9 @@ def new_win(name):
     try:
         sesh = srv.new_session('managed_session')
     except libtmux.exc.TmuxSessionExists:
-        sesh = [s for s in srv.list_sessions() if s.session_name == 'managed_session'][0]
+        sesh = [s for s in srv.sessions if s.session_name == 'managed_session'][0]
     return sesh.new_window(name)
 
-def wrt(*values, ex=False):
-    for value in values:
-        log.write(str(value) + '\n')
-    log.flush()
-    if ex:
-        exit()
 
 # Function is called both for creating a menu in an active pane and as a handler for creating new pane and "populating" it with keys
 # This is required by the fact, that some keys' sending has to be precieved by returned characters, which implementation
@@ -986,6 +1029,7 @@ signal.signal(signal.SIGTERM, normalexit)
 signal.signal(signal.SIGPOLL, neighbors)
 signal.signal(signal.SIGUSR1, neighbors)
 signal.signal(signal.SIGUSR2, macros)
+signal.signal(signal.SIGCHLD, signal.SIG_IGN)
 
 if __name__ == '__main__':
     entrymessage = 'test entry message'

@@ -471,6 +471,14 @@ def main(scr, entrymessage=None):
         scr.move(y_pos, 0)
         scr.refresh()
     
+    def reset(n=True, h=True, t=True, r=0):
+        nonlocal nested, highlstr, top_displayed, picked_cons
+        nested = 0 if n else None
+        highlstr = 0 if h else None
+        top_displayed = 0 if t else None
+        picked_cons = set()
+        redraw(r)
+    
     curses.curs_set(0)
     redraw(0)
 
@@ -653,9 +661,7 @@ def main(scr, entrymessage=None):
                         if len(cfg['default_templ']) > 0 and '\t' not in cfg['new_profile']:
                             profname = f'{profname}\t{cfg["default_templ"]}'
                         profiles = [unique_name(profname) + '\n', *hosts] + profiles
-                        highlstr = 0
-                        top_displayed = 0
-                        redraw(0)
+                        reset(n=False)
 
                 case 18:     # Ctrl+R for removing profiles or servers
                     if nested:
@@ -701,7 +707,7 @@ def main(scr, entrymessage=None):
 
                 case 23:        # Ctrl+W - nuke sort string
                     sort = ''
-                    redraw(0)
+                    reset()
 
                 case 1:         # Ctrl+A - Select all hosts from the profile
                     if nested:
@@ -740,11 +746,7 @@ def main(scr, entrymessage=None):
 
                     profiles = newprof + profiles
                     file.close()
-                    nested = 0
-                    highlstr = 0
-                    top_displayed = 0
-                    redraw(0)
-
+                    reset()
                 
                 case 16:        # Ctrl+P - Create a continuously updating window with the log file contents in it
                     tailing_print()
@@ -890,24 +892,15 @@ def main(scr, entrymessage=None):
 
                 case 263:   # backspace removes characters from sorting string
                     sort = sort[:-1]
-                    highlstr = 0
-                    nested = 0
-                    top_displayed = 0
-                    picked_cons = set()
-                    redraw(0)
+                    reset()
 
                 case _: # rest of the keys for sorting (or ignoring)
                     if keypress in list(range(97, 123)) + list(range(65, 91)) + list(range(48, 58)):
-                        if top_displayed > 0:
-                            top_displayed = 0
                         if nested:
                             sort = chr(keypress)
                         else:
                             sort += chr(keypress)
-                        highlstr = 0
-                        nested = 0
-                        picked_cons = set()
-                        redraw(0)
+                        reset()
                     else:
                         continue
             

@@ -109,9 +109,9 @@ def main(scr, entrymessage=None):
     global profiles
     global conn_params
     global create_connection
-    global nodetails
     stop_print = threading.Event()
     nodetails = False
+#    threading.excepthook()
     tabsize = curses.get_tabsize()
     bottom, width = scr.getmaxyx()
     nested = 0
@@ -222,6 +222,7 @@ def main(scr, entrymessage=None):
 
 
     def accept_input(message='', preinput='', start=None):
+        nonlocal nodetails
         if start is None:
             conn = profiles[resolve('conn')]
             start = len(conn.expandtabs().rstrip()) + tabsize + len(message)
@@ -234,9 +235,10 @@ def main(scr, entrymessage=None):
         scr.refresh()
         box = Textbox(editwin, insert_mode=True)
         if box.edit() is None:  # editing was canceled, no changes needs to be applied
-            redraw()
+            nodetails = False
             curses.curs_set(0)
-            return
+            redraw()
+            raise AssertionError("Canceled Input")
         redraw()
         curses.curs_set(0)
         return box.gather()[:-1]
@@ -416,7 +418,7 @@ def main(scr, entrymessage=None):
             if 'key ' not in pstr and '/' in pstr:
                 params['user'], params['pass'] = re.search(r'^([^ ]+)/([^ ]+)', pstr).groups()
             if '|' in pstr:
-                params['afterwards'] = pstr.split('|')[1]
+                params['afterwards'] = pstr[pstr.find('|') + 1:].strip()
 
         if not commands:
             return params
@@ -584,6 +586,16 @@ def main(scr, entrymessage=None):
                         redraw()
 
 
+                case 336:   # Shift + arrow down for mass host selection
+                    pass
+                case 337:   # Shift + arrow up (same as above)
+                    pass
+                case 393:   # Shift + arrow left for copying host's details
+                    pass
+                case 402:   # Shift + arrow right for applying copied details (can be used on many)
+                    pass
+
+
                 case 10:    # Enter spawns new tmux windows and sends connection commands to them
                     if not nested:
                         continue
@@ -601,15 +613,7 @@ def main(scr, entrymessage=None):
                         else:
                             pane = win.split_window()
                        
-                        error_message = ''
-                        try:
-                            threading.Thread(target=create_connection, args=[pane,conn]).start()
-                        except AssertionError as e:
-                            error_message = str(e)
-                            pane.kill()
-                        except Exception as e:
-                            error_message = f'An error occured during an attempt to create chosen connection(s)\n\n{traceback.format_exc()}'
-                            pane.kill()
+                        threading.Thread(target=create_connection, args=[pane,conn]).start()
 
                     try:
                         win.select_layout('tiled')
@@ -617,7 +621,6 @@ def main(scr, entrymessage=None):
                         pass
                     picked_cons = set()
                     redraw()
-                    print_message(error_message)
 
                 case 5: # Ctrl+E for editing a string where cursor at
                     replace_line = resolve('prof')
@@ -635,11 +638,7 @@ def main(scr, entrymessage=None):
                                 incr += 1
                             lasttab = ind
 
-                    newline = accept_input(preinput=editline, start=0)
-                    if newline is None:
-                        continue
-                    newline = re.sub(' {2,}+', '\t', newline)
-                    
+                    newline = re.sub(' {2,}+', '\t', accept_input(preinput=editline, start=0))
                     if not nested:
                         if len(sort) > 0 and not re.match(sort, newline.split('\t')[0], re.I):
                             sort = newline[:2].lower()
@@ -752,10 +751,14 @@ def main(scr, entrymessage=None):
                     tailing_print()
 
                 case 12:        # Ctrl+L - Create a background process for tunneling
+                    try:
+                        hp = conn_params()  # hp - host parameters
+                    except Exception:
+                        print_message(f'There is an error with the connection parsing\n\n{traceback.format_exc()}')
+                        continue
+
                     defaultport = cfg["src_tunnel_port"]
                     sport = accept_input(message=f'Source port - empty for default {defaultport} and try to increase if already in use or 0 for random: ')
-                    if sport is None:
-                        continue
                     if sport == '':
                         sport = defaultport
                     if not sport.isdigit():
@@ -770,18 +773,15 @@ def main(scr, entrymessage=None):
                         try:
                             s = socket.socket()
                             s.bind(('', sport + num))
-                            port = s.getsockname()[1]
+                            sport = s.getsockname()[1]
                             s.close()
                             break
-                        except OSError:
+                        except OSError as e:
                             continue
 
                     defaultport = cfg["dst_tunnel_port"]
                     print_message(f'Source port - {sport}', voffset=1)
                     dport = accept_input(message=f'Destination port (empty for default {defaultport}) - ')
-                    
-                    if dport is None:
-                        continue
                     if dport == '':
                         dport = defaultport
                     if not dport.isdigit():
@@ -791,8 +791,18 @@ def main(scr, entrymessage=None):
                     if dport > 65535:
                         print_message('Entered port out of range of available ports')
                         continue
+                    
+                    targethost = '127.0.0.1'
+                    if 'ssh ' in hp['afterwards'] and re.search(r'ssh (\w+)', hp['afterwards']):
+                        optionaltarget = re.search(r'ssh (\w+)', hp['afterwards']).group(1)
+                        if accept_input(message=f'Found an additional host this entry is connecting to, should {optionaltarget} be used as a target one (y is default)? [y/n]: ') in ('', 'y'):
+                            targethost = optionaltarget
 
-                    print_message(f'Chosen ports - {sport} and {dport}')
+                    ssh_options = f'-4 -f -N -L {sport}:{targethost}:{dport} {hp["user"]}@{hp["address"]} -p {hp["port"]}'
+
+                    if hp['key'] is not None:
+                        ssh_options += f' -i {hp["key"]}'
+                    proc_handler('ssh', ssh_options.split(' '), hp['pass'])
 
                 case 11:        # Ctrl+K - Put an identity file in remote host's authorized_keys (should work only if password is defined for connection)
                     pass
@@ -800,7 +810,12 @@ def main(scr, entrymessage=None):
 
                 case 6 | 20:    # Ctrl+F or Ctrl+T for uploading files from or to host
                     if not nested:
-                        print_message('File uploading supported for single host at a time, sry(')
+                        print_message('File uploading is yet not supported for the multiple hosts at a time')
+                        continue
+                    try:
+                        hp = conn_params()  # hp - host parameters
+                    except Exception:
+                        print_message(f'There is an error with the connection parsing\n\n{traceback.format_exc()}')
                         continue
 
                     nodetails = True
@@ -823,16 +838,6 @@ def main(scr, entrymessage=None):
                         filename = autocomplete_loop('Enter a filename to be uploaded to host - ', cfg['upload_to_path'] + '/')
                     else:
                         filename = accept_input(message='Enter a filename to be uploaded from host - ', preinput=cfg[f'upload_from_path'] + '/')
-                    if filename is None:
-                        nodetails = False
-                        redraw()
-                        continue 
-
-                    try:
-                        hp = conn_params()  # hp - host parameters
-                    except Exception:
-                        print_message(f'There is an error with the connection parsing\n\n{traceback.format_exc()}')
-                        continue
 
                     if option == 1:
                         src, dst = filename, f'{hp["user"]}@{hp["address"]}:'
@@ -843,7 +848,7 @@ def main(scr, entrymessage=None):
                         if hp['key'] is not None:
                             scp_options += f' -i {hp["key"]}'
 
-                        wrt(f'The following command will be executed - scp {scp_options} {src} {dst}')
+                        wrt(f'The following command will be executed:\nscp {scp_options} {src} {dst}')
                         proc_handler('scp', [scp_options, src, dst], hp['pass'])
 
                     else:
@@ -908,6 +913,8 @@ def main(scr, entrymessage=None):
             redraw()
             print_message('There was a not-so critical error with displaying a text')
             wrt(traceback.format_exc())
+        except AssertionError:  # Exception raised intentionally for handling input canceling in one place
+            pass
         except Exception:
             redraw(0)
             print_message('There was a relatively critical error, details of which were written to a log')

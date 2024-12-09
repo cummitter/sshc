@@ -1,20 +1,20 @@
 #!/usr/bin/python
 
-import os
 import curses
-import traceback
-import re
+import keyring
 import libtmux
+import os
+import re
 import signal
-import warnings
-import threading
-import subprocess
 import socket
+import subprocess
+import threading
+import traceback
+from getpass import getpass
 from gnupg import GPG
 from textpad import Textbox
 from time import sleep, time
-warnings.filterwarnings("ignore")
-
+from secrets import token_urlsafe
 
 def wrt(*values, ex=False):
     for value in values:
@@ -24,17 +24,16 @@ def wrt(*values, ex=False):
         exit()
 
 
-user_folder = os.path.expanduser('~') + '/.sshc'
-if not os.path.isdir(user_folder):
-    os.mkdir(user_folder)
+userdir = os.path.expanduser('~') + '/.sshc'
+if not os.path.isdir(userdir):
+    os.mkdir(userdir)
 try:
-    config_file = open(f'{user_folder}/config')
+    config_file = open(f'{userdir}/config')
 except OSError:
     exit('Configuration file is missing or have insufficient priviligies to open, please refer to ~/.sshc/config.template')
 
 cfg = {
     'file_path': 'profiles',
-    'passphrase': '',
     'logfile': '/var/log/sshc',
     'templ_list': {},
     'default_templ': '',
@@ -76,34 +75,62 @@ if len(cfg['new_profile']) < 2:     # if something unsuitable was found in a fil
 for param in lines:
     cfg.update([param.strip().split('=')])
 
+mainfile = cfg['file_path']
 if '/' not in cfg['file_path']:
-    cfg['file_path'] = user_folder + '/' + cfg['file_path']
+    mainfile = userdir + '/' + cfg['file_path']
 
-if os.path.isdir(f'{user_folder}/from_scripts'):
-    cfg['from_scripts'] = sorted(os.listdir(f'{user_folder}/from_scripts'))
-if os.path.isdir(f'{user_folder}/to_scripts'):
-    cfg['to_scripts'] = sorted(os.listdir(f'{user_folder}/to_scripts'))
-
+if os.path.isdir(f'{userdir}/from_scripts'):
+    cfg['from_scripts'] = sorted(os.listdir(f'{userdir}/from_scripts'))
+if os.path.isdir(f'{userdir}/to_scripts'):
+    cfg['to_scripts'] = sorted(os.listdir(f'{userdir}/to_scripts'))
 
 
 gpg = GPG()
 log = open(cfg['logfile'], 'w')
 srv = libtmux.Server()
 
-try:
-    with open(cfg['file_path'], 'rb') as f:
-        profiles = str(gpg.decrypt_file(f)).split('\n')[:-1]
-except OSerror:
-    exit("Profiles file is not found or can't be opened")
+def decrypt(file, passphrase=None):
+    try:
+        with open(file, 'rb') as f:
+            res = str(gpg.decrypt_file(f, passphrase=key))
+            if len(res) == 0:
+                return None
+            return [rec + '\n' for rec in res.split('\n')[:-1]]
+    except OSError:
+        exit(f'{file} file can not be opened')
 
-if len(profiles) > 0:
-    profiles = [rec + '\n' for rec in profiles]
-    os.system(f'cp {cfg["file_path"]} {user_folder}/.profbkp')
+if os.path.isfile(mainfile):
+    filetype = os.popen(f'file --mime-type -b {mainfile}').read()
+    
+    if 'pgp-encrypted' in filetype:
+        key = keyring.get_password(mainfile + '_' + str(os.stat(mainfile).st_ino), os.getlogin())
+        if key:
+            profiles = decrypt(mainfile, key)
+            if not profiles:
+                exit('Profiles file is encrypted and there is a passphrase associated with the file found in keyring, but it doesn\'t decrypt the file')
+
+        else:
+            key = getpass('Profiles file is encrypted, but there is no passphrase in the keyring to decrypt it\n' \
+                          'You can enter password manually, it will be used for encrypting file after you done with the program: ')
+            for i in range(3):
+                profiles = decrypt(mainfile, key)
+                if profiles:
+                    break
+                else:
+                    key = getpass('Sorry, try again: ')
+            if not profiles:
+                exit()
+
+    elif 'plain' in filetype:
+        with open(mainfile, 'r') as f:
+            profiles = f.readlines()
+    else:
+        exit('Profiles file is not in a plain text, nor considered to be pgp-encrypted according to the "file" utility')
+
 else:
-    exit(f'Wrong passprhase for {cfg["file_path"]}')
+    profiles = ['New profile\n', '\tnew\t10.100.0.0\n']
+
 profs_hash = hash(str(profiles))
-
-
 def main(scr, entrymessage=None):
 
     global profiles
@@ -853,7 +880,7 @@ def main(scr, entrymessage=None):
 
                     else:
                         chosen_script = cfg[f'{action}_scripts'][option - 2]
-                        subprocess.Popen([f'{user_folder}/{action}_scripts/{chosen_script}', hp['address'],
+                        subprocess.Popen([f'{userdir}/{action}_scripts/{chosen_script}', hp['address'],
                                       str(hp['port']), str(hp['key']), f'"{hp["pass"]}"', str(hp["user"]), str(filename)], stdout=log, stderr=log)
                     tailing_print()
 
@@ -968,7 +995,7 @@ def neighbors(signal, frame):
 def macros(signal, frame):
 
     try:
-        macros_file = open(f'{user_folder}/macros')
+        macros_file = open(f'{userdir}/macros')
     except FileNotFoundError:
         os.system("tmux display-message -d 3000 'Could not find or open \"macros\" file' 2>/dev/null")
         return
@@ -1011,8 +1038,8 @@ def macros(signal, frame):
     macros_file.close()
 
 def normalexit(signal, frame):
-    
     global profiles
+    global key
     if profs_hash == hash(str(profiles)):
         exit(0)
 
@@ -1026,7 +1053,14 @@ def normalexit(signal, frame):
                 break
             result.append(conn)
     profiles = result
-    gpg.encrypt(''.join(profiles), recipients=None, symmetric=True, passphrase=cfg['passphrase'], output=f'{cfg["file_path"]}')
+ 
+    if not os.path.isfile(mainfile) and 'pgp-encrypted' in filetype:
+        key = keyring.set_password(mainfile + str(os.stat(mainfile).st_ino), os.getlogin(), token_urlsafe(64))
+        gpg.encrypt(''.join(profiles), recipients=None, symmetric=True, passphrase=key, output=mainfile)
+    
+    else:   # either if there was no file in the first place or the plain text was provided
+        pass
+
     exit(0)
 
 signal.signal(signal.SIGINT, normalexit)

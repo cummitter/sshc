@@ -24,6 +24,7 @@ def wrt(*values, ex=False):
         exit()
 
 
+entrymessage = ''
 userdir = os.path.expanduser('~') + '/.sshc'
 if not os.path.isdir(userdir):
     os.mkdir(userdir)
@@ -128,7 +129,9 @@ if os.path.isfile(mainfile):
         exit('Profiles file is not in a plain text, nor considered to be pgp-encrypted according to the "file" utility')
 
 else:
-    profiles = ['New profile\n', '\tnew\t10.100.0.0\n']
+    profiles = cfg['new_profile']
+    entrymessage = 'Profiles file was not found (which is normal during the first launch), the new one will be saved after exiting the program'
+
 
 profs_hash = hash(str(profiles))
 def main(scr, entrymessage=None):
@@ -264,8 +267,7 @@ def main(scr, entrymessage=None):
         if box.edit() is None:  # editing was canceled, no changes needs to be applied
             nodetails = False
             curses.curs_set(0)
-            redraw()
-            raise AssertionError("Canceled Input")
+            redraw(breakout=True)
         redraw()
         curses.curs_set(0)
         return box.gather()[:-1]
@@ -491,7 +493,7 @@ def main(scr, entrymessage=None):
 
             pane.cmd('send-keys', command + '\n')
 
-    def redraw(y_pos=None):
+    def redraw(y_pos=None, breakout=False):
         if y_pos is None:
             y_pos = pos
         scr.erase()
@@ -499,6 +501,8 @@ def main(scr, entrymessage=None):
         scr.addstr(bottom - 2, 4, f'Sort by {sort}.*')
         scr.move(y_pos, 0)
         scr.refresh()
+        if breakout:
+            raise AssertionError
     
     def reset(n=True, h=True, t=True, r=0):
         nonlocal nested, highlstr, top_displayed, picked_cons
@@ -533,13 +537,11 @@ def main(scr, entrymessage=None):
                     exceed = 0
                     if nested:
                         if conn_count == nested_pos:
-                            redraw(highlstr + 1)
-                            continue
+                            redraw(highlstr + 1, breakout=True)
                     else:
                         if highlstr + 1 == profiles_count:
                             highlstr = 0
-                            redraw(0)
-                            continue
+                            redraw(0, breakout=True)
                         
                         for index, value in enumerate(profiles[resolve('prof') + conn_count + 2:]):
                             if not value.startswith('\t'):
@@ -555,14 +557,12 @@ def main(scr, entrymessage=None):
                     exceed = 0
                     if nested:
                         if nested_pos == 1:
-                            redraw(highlstr + conn_count)
-                            continue
+                            redraw(highlstr + conn_count, breakout=True)
                     else:
                         if highlstr - 1 < 0:
                             if top_displayed != 0:
                                 top_displayed -=1
-                                redraw(0)
-                                continue
+                                redraw(0, breakout=True)
                             
                             if profiles_count + 1 > bottom - 3:
                                 for index, value in enumerate(reversed(profiles)):
@@ -571,12 +571,10 @@ def main(scr, entrymessage=None):
                                     exceed += 1
                                 top_displayed += profiles_count - bottom + 3 + exceed
                                 highlstr = bottom - 3 - exceed - 1
-                                redraw(highlstr)
-                                continue
+                                redraw(highlstr, breakout=True)
 
                             highlstr = profiles_count - 1
-                            redraw(highlstr)
-                            continue
+                            redraw(highlstr, breakout=True)
                         
                         exceed = 0
                         for index, value in enumerate(reversed(profiles[:resolve('prof')])):
@@ -593,11 +591,10 @@ def main(scr, entrymessage=None):
                     if nested:
                         if nested_pos in picked_cons:
                             picked_cons.remove(nested_pos)
-                            redraw()
-                        else:
-                            nested = 0
-                            picked_cons = set()
-                            redraw(highlstr)
+                            redraw(breakout=True)
+                        nested = 0
+                        picked_cons = set()
+                        redraw(highlstr)
                     else:
                         if highlstr == 0 and top_displayed != 0:
                             top_displayed = 0
@@ -607,10 +604,9 @@ def main(scr, entrymessage=None):
                 case 261:   # arrow right - →
                     if not nested:
                         nested = 1
-                        redraw(pos + 1)
-                    else:
-                        picked_cons.add(nested_pos)
-                        redraw()
+                        redraw(pos + 1, breakout=True)
+                    picked_cons.add(nested_pos)
+                    redraw()
 
 
                 case 336:   # Shift + arrow down for mass host selection
@@ -680,14 +676,14 @@ def main(scr, entrymessage=None):
                     if nested:
                         insert_point = resolve('conn') + 1
                         profiles[insert_point:insert_point] = ['\tnew\t10.100.0.0\n']
-                        redraw(pos + 1)
-                    else:
-                        profname = sort.lower() + cfg['new_profile'][0].strip()
-                        hosts = cfg['new_profile'][1:]
-                        if len(cfg['default_templ']) > 0 and '\t' not in cfg['new_profile']:
-                            profname = f'{profname}\t{cfg["default_templ"]}'
-                        profiles = [unique_name(profname) + '\n', *hosts] + profiles
-                        reset(n=False)
+                        redraw(pos + 1, breakout=True)
+
+                    profname = sort.lower() + cfg['new_profile'][0].strip()
+                    hosts = cfg['new_profile'][1:]
+                    if len(cfg['default_templ']) > 0 and '\t' not in cfg['new_profile']:
+                        profname = f'{profname}\t{cfg["default_templ"]}'
+                    profiles = [unique_name(profname) + '\n', *hosts] + profiles
+                    reset(n=False)
 
                 case 18:     # Ctrl+R for removing profiles or servers
                     if nested:
@@ -696,9 +692,8 @@ def main(scr, entrymessage=None):
                             continue
                         profiles.pop(resolve('conn'))
                         if pos - conn_count == highlstr:  # if removed host was last in the list
-                            redraw(pos - 1)
-                        else:
-                            redraw()
+                            redraw(pos - 1, breakout=True)
+                        redraw()
                     else:
                         remove_start_point = resolve('prof')
                         remove_end_point = 0 
@@ -709,10 +704,9 @@ def main(scr, entrymessage=None):
                             remove_end_point = remove_start_point + index + 1   # this copied only for the case of removal the last profile
                         del profiles[remove_start_point:remove_end_point]
                         if highlstr == 0:
-                            redraw(0)
-                        else:
-                            highlstr = pos - 1
-                            redraw(highlstr)
+                            redraw(0, breakout=True)
+                        highlstr = pos - 1
+                        redraw(highlstr)
 
                 case 4 | 9:     # Ctrl+D | I for duplicating (connections only). I increases last octet and turns out that <TAB> is also Ctrl+I???
                     if not nested:
@@ -892,8 +886,7 @@ def main(scr, entrymessage=None):
                     if pos - highlstr == conn_count:
                         profiles[first_index:first_index] = [profiles[conn_index]]
                         profiles.pop(conn_index + 1)
-                        redraw(pos - conn_count + 1)
-                        continue
+                        redraw(pos - conn_count + 1, breakout=True)
                     profiles[conn_index], profiles[conn_index + 1] = profiles[conn_index + 1], profiles[conn_index]
                     redraw(pos + 1)
 
@@ -905,8 +898,7 @@ def main(scr, entrymessage=None):
                     if pos - 1 == highlstr:
                         profiles[last_index:last_index] = [profiles[conn_index]]
                         profiles.pop(conn_index)
-                        redraw(pos + conn_count - 1)
-                        continue
+                        redraw(pos + conn_count - 1, breakout=True)
                     profiles[conn_index], profiles[conn_index - 1] = profiles[conn_index - 1], profiles[conn_index]
                     redraw(pos - 1)
 
@@ -1054,13 +1046,17 @@ def normalexit(signal, frame):
             result.append(conn)
     profiles = result
  
-    if not os.path.isfile(mainfile) and 'pgp-encrypted' in filetype:
-        key = keyring.set_password(mainfile + str(os.stat(mainfile).st_ino), os.getlogin(), token_urlsafe(64))
-        gpg.encrypt(''.join(profiles), recipients=None, symmetric=True, passphrase=key, output=mainfile)
-    
-    else:   # either if there was no file in the first place or the plain text was provided
-        pass
+    if not os.path.isfile(mainfile):    # By default encrypt newly created files
+        open(mainfile, 'a').close()
+        key = token_urlsafe(64)
+        keyring.set_password(mainfile + '_' + str(os.stat(mainfile).st_ino), os.getlogin(), key)
+    elif 'plain' in filetype:
+        with open(mainfile, 'w') as f:
+            for line in profiles:
+                f.write(line)
+        exit(0)
 
+    gpg.encrypt(''.join(profiles), recipients=None, symmetric=True, passphrase=key, output=mainfile)
     exit(0)
 
 signal.signal(signal.SIGINT, normalexit)
@@ -1072,5 +1068,4 @@ signal.signal(signal.SIGUSR2, macros)
 signal.signal(signal.SIGCHLD, signal.SIG_IGN)
 
 if __name__ == '__main__':
-    entrymessage = 'test entry message'
     curses.wrapper(main, entrymessage)

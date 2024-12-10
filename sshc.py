@@ -44,6 +44,7 @@ cfg = {
     'port': 22,
     'password': 'undefined_password',
     'timeout': 10,
+    'select_multiplier': 4,
     'import_path': '',
     'from_scripts': [],
     'to_scripts': [],
@@ -224,7 +225,7 @@ def main(scr, entrymessage=None):
             message_text = ' \n'.join(message_text)
 
         if len(message_text) + print_point > width - 15 or '\n' in message_text:    # If message does not visually fits in single line, put it into a rectangled window  
-            redraw()                                                                # and remove the details of surrounding connections if nodetails is set
+            redraw(breakout=False)                                                  # and remove the details of surrounding connections if nodetails is set
             lines = ['']
             linenum = 0
             for word in message_text.split(' '):
@@ -267,8 +268,8 @@ def main(scr, entrymessage=None):
         if box.edit() is None:  # editing was canceled, no changes needs to be applied
             nodetails = False
             curses.curs_set(0)
-            redraw(breakout=True)
-        redraw()
+            redraw()
+        redraw(breakout=False)
         curses.curs_set(0)
         return box.gather()[:-1]
 
@@ -354,7 +355,7 @@ def main(scr, entrymessage=None):
 
     def tailing_print():
         nodetails = True
-        redraw()
+        redraw(breakout=False)
         stop_print.clear()
         threading.Thread(target=__continuous_print, daemon=True).start()
 
@@ -493,7 +494,9 @@ def main(scr, entrymessage=None):
 
             pane.cmd('send-keys', command + '\n')
 
-    def redraw(y_pos=None, breakout=False):
+    def redraw(y_pos=None, breakout=True): 
+        if y_pos is not None and not nested:
+           nonlocal highlstr; highlstr = y_pos
         if y_pos is None:
             y_pos = pos
         scr.erase()
@@ -513,7 +516,7 @@ def main(scr, entrymessage=None):
         redraw(r)
     
     curses.curs_set(0)
-    redraw(0)
+    redraw(0, breakout=False)
 
     while True:
         bottom, width = scr.getmaxyx()
@@ -537,82 +540,86 @@ def main(scr, entrymessage=None):
                     exceed = 0
                     if nested:
                         if conn_count == nested_pos:
-                            redraw(highlstr + 1, breakout=True)
-                    else:
-                        if highlstr + 1 == profiles_count:
-                            highlstr = 0
-                            redraw(0, breakout=True)
-                        
-                        for index, value in enumerate(profiles[resolve('prof') + conn_count + 2:]):
-                            if not value.startswith('\t'):
-                                break
-                            if pos + 1 + index + 1 >= bottom - 3:
-                                exceed += 1
-                        top_displayed += exceed
-
-                        highlstr = pos + 1 - exceed
+                            redraw(highlstr + 1)
+                        redraw(pos + 1)
+                    
+                    if highlstr + 1 == profiles_count:
+                        redraw(0)
+                    
+                    for index, value in enumerate(profiles[resolve('prof') + conn_count + 2:]):
+                        if not value.startswith('\t'):
+                            break
+                        if pos + 1 + index + 1 >= bottom - 3:
+                            exceed += 1
+                    top_displayed += exceed
                     redraw(pos + 1 - exceed)
 
                 case 259:   # arrow up - ↑
                     exceed = 0
                     if nested:
                         if nested_pos == 1:
-                            redraw(highlstr + conn_count, breakout=True)
-                    else:
-                        if highlstr - 1 < 0:
-                            if top_displayed != 0:
-                                top_displayed -=1
-                                redraw(0, breakout=True)
-                            
-                            if profiles_count + 1 > bottom - 3:
-                                for index, value in enumerate(reversed(profiles)):
-                                    if not value.startswith('\t'):
-                                        break
-                                    exceed += 1
-                                top_displayed += profiles_count - bottom + 3 + exceed
-                                highlstr = bottom - 3 - exceed - 1
-                                redraw(highlstr, breakout=True)
+                            redraw(highlstr + conn_count)
+                        redraw(pos - 1)
 
-                            highlstr = profiles_count - 1
-                            redraw(highlstr, breakout=True)
+                    if highlstr - 1 < 0:
+                        if top_displayed != 0:
+                            top_displayed -=1
+                            redraw(0)
                         
-                        exceed = 0
-                        for index, value in enumerate(reversed(profiles[:resolve('prof')])):
-                            if not value.startswith('\t'):
-                                break
-                            if pos + 1 + index > bottom - 3:
+                        if profiles_count + 1 > bottom - 3:
+                            for index, value in enumerate(reversed(profiles)):
+                                if not value.startswith('\t'):
+                                    break
                                 exceed += 1
-                        top_displayed += exceed
-
-                        highlstr = pos - 1 - exceed
+                            top_displayed += profiles_count - bottom + 3 + exceed
+                            redraw(bottom - 3 - exceed - 1)
+                        redraw(profiles_count - 1)
+                    
+                    exceed = 0
+                    for index, value in enumerate(reversed(profiles[:resolve('prof')])):
+                        if not value.startswith('\t'):
+                            break
+                        if pos + 1 + index > bottom - 3:
+                            exceed += 1
+                    top_displayed += exceed
                     redraw(pos - 1 - exceed)
                 
                 case 260:   # arrow left - ←
                     if nested:
                         if nested_pos in picked_cons:
                             picked_cons.remove(nested_pos)
-                            redraw(breakout=True)
+                            redraw()
                         nested = 0
                         picked_cons = set()
                         redraw(highlstr)
-                    else:
-                        if highlstr == 0 and top_displayed != 0:
-                            top_displayed = 0
-                        highlstr = 0
-                        redraw(0)
+                    
+                    if highlstr == 0 and top_displayed != 0:
+                        top_displayed = 0
+                    redraw(0)
 
                 case 261:   # arrow right - →
                     if not nested:
                         nested = 1
-                        redraw(pos + 1, breakout=True)
+                        redraw(pos + 1)
                     picked_cons.add(nested_pos)
                     redraw()
 
-
                 case 336:   # Shift + arrow down for mass host selection
-                    pass
+                    if nested:
+                        selected = [i for i in range(nested_pos, conn_count + 1) if not profiles[resolve('prof') + i].split('\t')[1].startswith('#')]
+                        if len(selected) > cfg['select_multiplier']:
+                            selected = selected[:cfg['select_multiplier']]
+                        picked_cons.update(selected)
+                        redraw(selected[-1])
+
                 case 337:   # Shift + arrow up (same as above)
-                    pass
+                    if nested:
+                        selected = [i for i in range(1, nested_pos + 1) if not profiles[resolve('prof') + i].split('\t')[1].startswith('#')]
+                        if len(selected) > cfg['select_multiplier']:
+                            selected = selected[cfg['select_multiplier'] * -1:]
+                        picked_cons.update(selected)
+                        redraw(selected[0])
+
                 case 393:   # Shift + arrow left for copying host's details
                     pass
                 case 402:   # Shift + arrow right for applying copied details (can be used on many)
@@ -634,7 +641,7 @@ def main(scr, entrymessage=None):
                             win.select()
                             pane = win.select_pane(0)
                         else:
-                            pane = win.split_window()
+                            pane = win.split()
                        
                         threading.Thread(target=create_connection, args=[pane,conn]).start()
 
@@ -676,7 +683,7 @@ def main(scr, entrymessage=None):
                     if nested:
                         insert_point = resolve('conn') + 1
                         profiles[insert_point:insert_point] = ['\tnew\t10.100.0.0\n']
-                        redraw(pos + 1, breakout=True)
+                        redraw(pos + 1)
 
                     profname = sort.lower() + cfg['new_profile'][0].strip()
                     hosts = cfg['new_profile'][1:]
@@ -692,21 +699,20 @@ def main(scr, entrymessage=None):
                             continue
                         profiles.pop(resolve('conn'))
                         if pos - conn_count == highlstr:  # if removed host was last in the list
-                            redraw(pos - 1, breakout=True)
+                            redraw(pos - 1)
                         redraw()
-                    else:
-                        remove_start_point = resolve('prof')
-                        remove_end_point = 0 
-                        for index, value in enumerate(profiles[remove_start_point + 1:], 1):
-                            if value[0] != '\t':
-                                remove_end_point = remove_start_point + index
-                                break
-                            remove_end_point = remove_start_point + index + 1   # this copied only for the case of removal the last profile
-                        del profiles[remove_start_point:remove_end_point]
-                        if highlstr == 0:
-                            redraw(0, breakout=True)
-                        highlstr = pos - 1
-                        redraw(highlstr)
+
+                    remove_start_point = resolve('prof')
+                    remove_end_point = 0 
+                    for index, value in enumerate(profiles[remove_start_point + 1:], 1):
+                        if value[0] != '\t':
+                            remove_end_point = remove_start_point + index
+                            break
+                        remove_end_point = remove_start_point + index + 1   # this copied only for the case of removal the last profile
+                    del profiles[remove_start_point:remove_end_point]
+                    if highlstr == 0:
+                        redraw(breakout=True)
+                    redraw(pos - 1)
 
                 case 4 | 9:     # Ctrl+D | I for duplicating (connections only). I increases last octet and turns out that <TAB> is also Ctrl+I???
                     if not nested:
@@ -849,7 +855,7 @@ def main(scr, entrymessage=None):
                     if len(options) > 1:
                         print_message(['Enter a number from the list of available options:'] + options)
                         keypress = scr.getch()
-                        redraw()
+                        redraw(breakout=False)
                         if keypress not in list(range(49, 49 + len(options))):
                             print_message('Entered key out of range of available options')
                             continue
@@ -886,7 +892,7 @@ def main(scr, entrymessage=None):
                     if pos - highlstr == conn_count:
                         profiles[first_index:first_index] = [profiles[conn_index]]
                         profiles.pop(conn_index + 1)
-                        redraw(pos - conn_count + 1, breakout=True)
+                        redraw(pos - conn_count + 1)
                     profiles[conn_index], profiles[conn_index + 1] = profiles[conn_index + 1], profiles[conn_index]
                     redraw(pos + 1)
 
@@ -898,7 +904,7 @@ def main(scr, entrymessage=None):
                     if pos - 1 == highlstr:
                         profiles[last_index:last_index] = [profiles[conn_index]]
                         profiles.pop(conn_index)
-                        redraw(pos + conn_count - 1, breakout=True)
+                        redraw(pos + conn_count - 1)
                     profiles[conn_index], profiles[conn_index - 1] = profiles[conn_index - 1], profiles[conn_index]
                     redraw(pos - 1)
 
@@ -911,7 +917,7 @@ def main(scr, entrymessage=None):
                         print_message(f'There is an error with the connection parsing\n\n{traceback.format_exc()}')
                         continue
                     nodetails = True
-                    redraw()
+                    redraw(breakout=False)
                     print_message(cmds)
 
                 case 263:   # backspace removes characters from sorting string
@@ -935,7 +941,7 @@ def main(scr, entrymessage=None):
         except AssertionError:  # Exception raised intentionally for handling input canceling in one place
             pass
         except Exception:
-            redraw(0)
+            redraw(0, breakout=False)
             print_message('There was a relatively critical error, details of which were written to a log')
             wrt(traceback.format_exc())
 
@@ -976,7 +982,7 @@ def neighbors(signal, frame):
 
     if signal == 29:    # SIGPOLL
         try:
-            pane = pane.split_window()
+            pane = pane.split()
             create_connection(pane, int(sesh.show_environment()['neighbor']) + 1, index)
             pane.select()
             sesh.remove_environment('neighbor')

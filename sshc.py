@@ -149,6 +149,7 @@ def main(scr, entrymessage=None):
     highlstr = 0
     top_displayed = 0
     sort = ''
+    copied_details = ''
     picked_cons = set()
 
     # The only function responsible for printing everything displayed in the screen, called only in redraw()
@@ -501,7 +502,7 @@ def main(scr, entrymessage=None):
             y_pos = pos
         scr.erase()
         print_profiles(y_pos)
-        scr.addstr(bottom - 2, 4, f'Sort by {sort}.*')
+        scr.addstr(bottom - 2, 4, f'Sort by {sort}.*\t  Copied details: {copied_details}')
         scr.move(y_pos, 0)
         scr.refresh()
         if breakout:
@@ -606,7 +607,7 @@ def main(scr, entrymessage=None):
 
                 case 336:   # Shift + arrow down for mass host selection
                     if nested:
-                        selected = [i for i in range(nested_pos, conn_count + 1) if not profiles[resolve('prof') + i].split('\t')[1].startswith('#')]
+                        selected = [i for i in range(nested_pos, conn_count + 1) if not profiles[resolve('prof') + i].startswith('\t#')]
                         if len(selected) > cfg['select_multiplier']:
                             selected = selected[:cfg['select_multiplier']]
                         picked_cons.update(selected)
@@ -614,16 +615,44 @@ def main(scr, entrymessage=None):
 
                 case 337:   # Shift + arrow up (same as above)
                     if nested:
-                        selected = [i for i in range(1, nested_pos + 1) if not profiles[resolve('prof') + i].split('\t')[1].startswith('#')]
+                        selected = [i for i in range(1, nested_pos + 1) if not profiles[resolve('prof') + i].startswith('\t#')]
                         if len(selected) > cfg['select_multiplier']:
                             selected = selected[cfg['select_multiplier'] * -1:]
                         picked_cons.update(selected)
                         redraw(selected[0])
 
                 case 393:   # Shift + arrow left for copying host's details
-                    pass
+                    line = profiles[resolve('conn')]
+                    if nested and line.count('\t') > 2:
+                        copied_details = line.split('\t')[3]
+                    elif not nested and line.count('\t') > 0:
+                        copied_details = line.split('\t')[1]
+                    else:
+                        copied_details = ''
+                    redraw()
+
                 case 402:   # Shift + arrow right for applying copied details (can be used on many)
-                    pass
+                    if nested:
+                        if len(picked_cons) == 0:
+                            picked_cons.add(nested_pos)
+
+                        for conn in picked_cons:
+                            line = profiles[resolve('prof') + conn].split('\t')
+                            if copied_details == '':
+                                profiles[resolve('prof') + conn] = '\t'.join(line[:3]).strip('\n') + '\n'
+                            else:
+                                profiles[resolve('prof') + conn] = '\t'.join(line[:3]).strip('\n') + '\t' + copied_details.strip('\n') + '\n'
+
+                        picked_cons = set()
+                        redraw()
+
+                    line = profiles[resolve('prof')].split('\t')
+                    if copied_details == '':
+                        profiles[resolve('prof')] = '\t'.join(line[:1]).strip('\n') + '\n'
+                    else:
+                        profiles[resolve('prof')] = '\t'.join(line[:1]).strip('\n') + '\t' + copied_details.strip('\n') + '\n'
+                    redraw()
+
 
 
                 case 10:    # Enter spawns new tmux windows and sends connection commands to them
@@ -935,7 +964,7 @@ def main(scr, entrymessage=None):
                         continue
             
         except curses.error:
-            redraw()
+            redraw(breakout=False)
             print_message('There was a not-so critical error with displaying a text')
             wrt(traceback.format_exc())
         except AssertionError:  # Exception raised intentionally for handling input canceling in one place

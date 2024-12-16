@@ -29,7 +29,6 @@ changes = []
 gpg = GPG()
 srv = libtmux.Server()
 stop_print = threading.Event()
-#    threading.excepthook()
 tabsize = curses.get_tabsize()
 picked_cons = set()
 
@@ -231,7 +230,6 @@ def hide_password(params):
 
 
 def macros(signal, frame):
-
     try:
         macros_file = open(f'{userdir}/macros')
     except FileNotFoundError:
@@ -241,7 +239,7 @@ def macros(signal, frame):
     # I was unable to find a different solution for including curly braces in a command's syntax,
     # so it is straight up garbage relying on a what-so constant execution of command-prompt
     # If you wish to debug this code, run resulting 'command' into the tmux, not via "tmux 'command-prompt'" command
-    def th(cmd):
+    def starter(cmd):
         srv.cmd('command-prompt', cmd)
 
     cmd = 'menu -T Macroses -x R -y 0 '
@@ -281,7 +279,7 @@ def macros(signal, frame):
             cmd += f'"{name}" {chr(keys[nestlevel])} "send-keys \\\'{command}\\\'{termsignals}" '
             keys[nestlevel] += 1
     
-    threading.Thread(target=th, args=[cmd]).start(); sleep(0.005); srv.cmd('send-keys', '-K', 'Enter')    # It is sort of a pipeline, no judgies pls
+    threading.Thread(target=starter, args=[cmd]).start(); sleep(0.005); srv.cmd('send-keys', '-K', 'Enter')    # It is sort of a pipeline, no judgies pls
     macros_file.close()
 
 
@@ -398,11 +396,11 @@ def print_message(message_text, offset=tabsize, voffset=0):
     conn = profiles[resolve('conn')]
     print_point = len(conn.expandtabs().rstrip()) + offset
     if nodetails:
-        print_point = len('\t'.join(conn.split('\t')[:3]).expandtabs().rstrip()) + offset 
+        print_point = len('\t'.join(conn.split('\t')[:3]).expandtabs().rstrip()) + offset
     if isinstance(message_text, list):
         message_text = ' \n'.join(message_text)
 
-    if len(message_text) + print_point > width - 15 or '\n' in message_text:    # If message does not visually fits in single line, put it into a rectangled window  
+    if len(message_text) + print_point > width - 10 or '\n' in message_text:    # If message does not visually fits in single line, put it into a rectangled window  
         redraw(breakout=False)                                                  # and remove the details of surrounding connections if nodetails is set
         lines = ['']
         linenum = 0
@@ -421,13 +419,12 @@ def print_message(message_text, offset=tabsize, voffset=0):
             lines[linenum] += word + ' '
 
         message_text = '\n'.join(lines)
-        msgwin = curses.newwin(message_text.count('\n') + 1, 80, pos + voffset, print_point)
+        msgwin = curses.newwin(message_text.count('\n') + 1, width - 10, pos + voffset, print_point)
         msgwin.addstr(message_text)
         msgwin.refresh()
         return
-    
+        
     scr.addstr(pos + voffset, print_point, message_text)
-    scr.refresh()
 
 
 # The only function responsible for printing everything displayed in the screen, called only in redraw()
@@ -561,7 +558,9 @@ def __continuous_print():
             return
 
     lucorner = len('\t'.join(profiles[resolve('conn')].split('\t')[:3]).expandtabs().rstrip()) + tabsize
-    msgwin = curses.newwin(bottom, 80, pos, lucorner)
+    if not nested:
+        lucorner += tabsize
+    msgwin = curses.newwin(bottom, width - 10, pos, lucorner)
     message = []
     for linenum, line in enumerate(tailf()):
         msgwin.erase()
@@ -570,6 +569,25 @@ def __continuous_print():
         message.append(line)
         msgwin.addstr(''.join(message))
         msgwin.refresh()
+
+
+def thread_handler(args):
+    global message
+    func = args.thread.name
+
+    if 'create_connection' in func:
+        reason = 'during the creation of the connection'
+    elif 'starter' in func:
+        reason = 'while sending macroses command to the tmux'
+    elif 'thr_handler' in func:
+        reason = 'in the forked process managing'
+    elif '__continuous_print' in func:
+        'during the procedure of continious log streaming'
+    else:
+        reason = 'which tracing is not yet implemented'
+
+    wrt(func, args.exc_value, '\n')
+    message = f'There was an unhandled error {reason}, see log for details'
 
 
 def unique_name(name):
@@ -603,8 +621,7 @@ signal.signal(signal.SIGPOLL, neighbors)
 signal.signal(signal.SIGUSR1, neighbors)
 signal.signal(signal.SIGUSR2, macros)
 signal.signal(signal.SIGCHLD, signal.SIG_IGN)
-
-
+threading.excepthook = thread_handler
 
 userdir = os.path.expanduser('~') + '/.sshc'
 if not os.path.isdir(userdir):
@@ -988,6 +1005,7 @@ while True:
                     ips = sorted(set(re.findall(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}', file.read())))
                 except Exception:
                     print_message(f'Could not open or read given file')
+                    file.close()
                     continue
 
                 if len(ips) == 0:
@@ -1010,6 +1028,7 @@ while True:
                 reset()
             
             case 16:        # Ctrl+P - Create a continuously updating window with the log file contents in it
+                nodetails = True
                 tailing_print()
 
             case 12:        # Ctrl+L - Create a background process for tunneling
@@ -1171,7 +1190,7 @@ while True:
         
     except curses.error:
         redraw(breakout=False)
-        print_message('There was a not-so critical error with displaying a text')
+        print_message('There was a not-so critical error with the screen rendering')
         wrt(traceback.format_exc())
     except AssertionError:  # Exception raised intentionally for handling input canceling in one place
         pass

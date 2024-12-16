@@ -25,6 +25,7 @@ sort = ''
 nested = 0
 highlstr = 0
 top_displayed = 0
+changes = []
 gpg = GPG()
 srv = libtmux.Server()
 stop_print = threading.Event()
@@ -207,11 +208,13 @@ def decrypt(file, passphrase=None):
     except OSError:
         exit(f'{file} file can not be opened')
 
-def deinitialize_scr():
+def deinitialize_scr(noexit=False):
     scr.keypad(0)
     curses.echo()
     curses.nocbreak()
     curses.endwin()
+    if noexit:
+        return
     exit(0)
 
 def hide_password(params):
@@ -242,24 +245,32 @@ def macros(signal, frame):
         srv.cmd('command-prompt', cmd)
 
     cmd = 'menu -T Macroses -x R -y 0 '
-    keys = [0,0,0,0,0,0,0,0,0,0,0,0]    # 've never done such a shame
+    keys = [48]     # 48 - ASCII code for zero
     nestlevel = 0
     for line in macros_file.readlines():
         line = line.split('# ')[0].strip()
-        firstword = line.split(' ')[0]
-        if '(' in firstword:
-            name = firstword.replace('(', '')
-            cmd += f'"{name}" {keys[nestlevel]} {{menu -T {name} -x R -y 0 '
+        firstwords = ''.join(line.split(' ')[:3])   # hard coded limitation for considering a string as a part of macroses
+        if '(' in firstwords:
+            keys.append(48)
+            if keys[nestlevel] == 58:
+                keys[nestlevel] = 97
+
+            name = line.replace('(', '')
+            cmd += f'"{name}" {chr(keys[nestlevel])} {{menu -T {name} -x R -y 0 '
             keys[nestlevel] += 1
             nestlevel += 1
-        if ')' in firstword:
-            keys[nestlevel] = 0
+
+        if ')' in firstwords:
+            keys[nestlevel] = 48
             nestlevel -= 1
             cmd += '}'
 
-        if ':' in firstword:
+        if ':' in firstwords:
+            if keys[nestlevel] == 58:
+                keys[nestlevel] = 97
+            
             termsignals = ''
-            name = firstword.replace(':', '')
+            name = line[:line.find(':')]
             command = line[line.find(':')+1:].strip()
             if '---' in command:
                 command, termsignals = command.split('---')
@@ -267,8 +278,9 @@ def macros(signal, frame):
             for char in '{}"$':
                 command = command.replace(char, f'\\{char}')
             command = command.replace("'", r"\'\"\'\"\'")
-            cmd += f'{name} {keys[nestlevel]} "send-keys \\\'{command}\\\'{termsignals}" '
+            cmd += f'"{name}" {chr(keys[nestlevel])} "send-keys \\\'{command}\\\'{termsignals}" '
             keys[nestlevel] += 1
+    
     threading.Thread(target=th, args=[cmd]).start(); sleep(0.005); srv.cmd('send-keys', '-K', 'Enter')    # It is sort of a pipeline, no judgies pls
     macros_file.close()
 
@@ -291,19 +303,26 @@ def neighbors(signal, frame):
 
     if signal == 10:     # SIGUSR1
         tmcmd = ['menu', '-x', 'R', '-y', '0']
-        for i, conn in enumerate(profiles[index + 1:]):
+        for i, conn in enumerate(profiles[index + 1:], 48):
             if not conn.startswith('\t'):
                 break
             conn = conn.strip().split('\t')
-            tmcmd += [f'{conn[0]} {conn[1]}', i, f'set-environment neighbor {i}; run-shell "pkill sshc -POLL"']
+            if i >= 58:
+                i += 39     # Shift to the a-z part of ASCII
+            tmcmd += [f'{conn[0]} {conn[1]}', chr(i), f'set-environment neighbor {chr(i)}; run-shell "pkill sshc -POLL"']
         pane.cmd(*tmcmd)
         return 0
 
     if signal == 29:    # SIGPOLL
         try:
+            conn_num = sesh.show_environment()['neighbor']
+            if conn_num.isdigit():
+                conn_num = int(conn_num) + 1
+            else:
+                conn_num = ord(conn_num) - 87 + 1   # 87 shifts ASCII code for letters to the integers higher than 9
             pane = pane.split()
-            create_connection(pane, int(sesh.show_environment()['neighbor']) + 1, index)
             pane.select()
+            create_connection(pane, conn_num, index)
             sesh.remove_environment('neighbor')
         except Exception:
             pane.kill()
@@ -343,11 +362,33 @@ def normalexit(signal, frame):
         open(mainfile, 'a').close()
         key = token_urlsafe(64)
         keyring.set_password(mainfile + '_' + str(os.stat(mainfile).st_ino), os.getlogin(), key)
+    
     elif 'plain' in filetype:
+        if not cfg['never_ask_for_encryption']:
+            deinitialize_scr(noexit=True)
+            option = input("Would you like to encrypt the file? (y - generate passphrase and save it to local keyring, n - don't encrypt, m - manually specified passphrase): ").lower()
+            
+            if option == 'y':
+                key = token_urlsafe(64)
+                keyring.set_password(mainfile + '_' + str(os.stat(mainfile).st_ino), os.getlogin(), key)
+                gpg.encrypt(''.join(profiles), recipients=None, symmetric=True, passphrase=key, output=mainfile)
+                exit(0)
+
+            elif option == 'm':
+                key = getpass('Enter the passphrase: ')
+                keyring.set_password(mainfile + '_' + str(os.stat(mainfile).st_ino), os.getlogin(), key)
+                gpg.encrypt(''.join(profiles), recipients=None, symmetric=True, passphrase=key, output=mainfile)
+                exit(0)
+
+            elif option == 'n':
+                pass
+
+            else:
+                print('Unrecognized option was entered, file will be saved in plain text')
+
         with open(mainfile, 'w') as f:
             for line in profiles:
                 f.write(line)
-        deinitialize_scr()
 
     gpg.encrypt(''.join(profiles), recipients=None, symmetric=True, passphrase=key, output=mainfile)
     deinitialize_scr()
@@ -471,7 +512,7 @@ def redraw(y_pos=None, breakout=True):
         y_pos = pos
     scr.erase()
     print_profiles(y_pos)
-    scr.addstr(bottom - 2, 4, f'Sort by {sort}.*\t  Copied details: {copied_details}')
+    scr.addstr(bottom - 2, 4, f'Sort by {sort}.*   Copied details: {copied_details}')
     scr.move(y_pos, 0)
     scr.refresh()
     if breakout:
@@ -575,6 +616,7 @@ except OSError:
 
 cfg = {
     'file_path': 'profiles',
+    'never_ask_for_encryption': False,
     'logfile': '/var/log/sshc',
     'templ_list': {},
     'default_templ': '',
@@ -860,13 +902,20 @@ while True:
                     if newline != profiles[replace_line].strip():
                         newline = unique_name(newline)
 
+                changes.append({replace_line: profiles[replace_line]})
                 profiles[replace_line] = newline + '\n'
                 redraw()
 
+            case 26:    # Ctrl+Z reverse applied changes
+                pass
+
+            case 27:    # Alt+Z reverse reversed changes
+                pass
 
             case 14:    # Ctrl+N for adding new profiles and servers
                 if nested:
                     insert_point = resolve('conn') + 1
+                    changes.append({insert_point: 'delete'})
                     profiles[insert_point:insert_point] = ['\tnew\t10.100.0.0\n']
                     redraw(pos + 1)
 
@@ -875,6 +924,7 @@ while True:
                 if len(cfg['default_templ']) > 0 and '\t' not in cfg['new_profile']:
                     profname = f'{profname}\t{cfg["default_templ"]}'
                 profiles = [unique_name(profname) + '\n', *hosts] + profiles
+                changes.append({'': 'delete_full'})
                 reset(n=False)
 
             case 18:     # Ctrl+R for removing profiles or servers

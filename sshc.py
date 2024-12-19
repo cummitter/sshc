@@ -24,7 +24,8 @@ message = ''
 sort = ''
 nested = 0
 highlstr = 0
-top_displayed = 0
+topprof = 0
+topconn = 0
 changes = []
 gpg = GPG()
 srv = libtmux.Server()
@@ -98,7 +99,7 @@ def autocomplete_loop(msg, path):
 
 def conn_params(conn_num=None, prof_index=None, commands=False):
     if prof_index is None:
-        prof_index = profiles.index([i for i in profiles if i[0] != '\t' and re.match(sort + '.*', i, re.I)][top_displayed:][highlstr])
+        prof_index = profiles.index([i for i in profiles if i[0] != '\t' and re.match(sort + '.*', i, re.I)][topprof:][highlstr])
         conn_index = prof_index + pos - highlstr
     if conn_num is not None:
         conn_index = prof_index + conn_num
@@ -172,6 +173,7 @@ def conn_params(conn_num=None, prof_index=None, commands=False):
 
 def create_connection(pane, conn_num, prof_index=None):
     first_line = 0
+    ssh_met = False
     for command in conn_params(conn_num, prof_index, commands=True):
         
         if command.startswith('wf'):
@@ -194,6 +196,10 @@ def create_connection(pane, conn_num, prof_index=None):
                 break   # If timeout occured, do not to send the rest
             continue
 
+        if not ssh_met and cfg['local_spacing']:
+            if command.startswith('ssh'):
+                ssh_met = True
+            command = ' ' + command
         pane.cmd('send-keys', command + '\n')
 
 
@@ -431,10 +437,10 @@ def print_message(message_text, offset=tabsize, voffset=0):
 # It has been proved to be easier to redraw everything with each motion
 def print_profiles(move):
     global profiles_count, conn_count
-    profiles_count = len([i for i in profiles if i[0] != '\t' and re.match(sort + '.*', i, re.I)][top_displayed:])
+    profiles_count = len([i for i in profiles if i[0] != '\t' and re.match(sort + '.*', i, re.I)][topprof:])
     
     pntr = 0
-    for prof in [i for i in profiles if i[0] != '\t' and re.match(sort + '.*', i, re.I)][top_displayed:]:
+    for prof in [i for i in profiles if i[0] != '\t' and re.match(sort + '.*', i, re.I)][topprof:]:
         if pntr + 3 == bottom:
             break
 
@@ -448,6 +454,7 @@ def print_profiles(move):
                 scr.addstr(pntr, 0, prof, curses.A_BOLD)
 
             conns_to_draw = []
+            if topconn: scr.addstr(pntr, 0, '...'); pntr +=1
             for i in profiles[resolve('prof') + 1:]:
                 if not i.startswith('\t'):
                     break
@@ -517,10 +524,10 @@ def redraw(y_pos=None, breakout=True):
 
 
 def reset(n=True, h=True, t=True, r=0):
-    global nested, highlstr, top_displayed, picked_cons
+    global nested, highlstr, topprof, picked_cons
     nested = 0 if n else None
     highlstr = 0 if h else None
-    top_displayed = 0 if t else None
+    topprof = 0 if t else None
     picked_cons = set()
     redraw(r)
 
@@ -528,7 +535,7 @@ def reset(n=True, h=True, t=True, r=0):
 # resolve actual position in the profiles list from the relative position on the screen
 def resolve(only_one=None):
     try:
-        prof_index = profiles.index([i for i in profiles if i[0] != '\t' and re.match(sort + '.*', i, re.I)][top_displayed:][highlstr])
+        prof_index = profiles.index([i for i in profiles if i[0] != '\t' and re.match(sort + '.*', i, re.I)][topprof:][highlstr])
     except Exception:
         return 0
     if only_one == 'prof':
@@ -642,6 +649,7 @@ cfg = {
     'user': 'undefined_user',
     'port': 22,
     'password': 'undefined_password',
+    'local_spacing': 0,
     'timeout': 10,
     'select_multiplier': 4,
     'import_path': '',
@@ -767,7 +775,7 @@ while True:
                         break
                     if pos + 1 + index + 1 >= bottom - 3:
                         exceed += 1
-                top_displayed += exceed
+                topprof += exceed
                 redraw(pos + 1 - exceed)
 
             case 259:   # arrow up - ↑
@@ -778,8 +786,8 @@ while True:
                     redraw(pos - 1)
 
                 if highlstr - 1 < 0:
-                    if top_displayed != 0:
-                        top_displayed -=1
+                    if topprof != 0:
+                        topprof -=1
                         redraw(0)
                     
                     if profiles_count + 1 > bottom - 3:
@@ -787,7 +795,7 @@ while True:
                             if not value.startswith('\t'):
                                 break
                             exceed += 1
-                        top_displayed += profiles_count - bottom + 3 + exceed
+                        topprof += profiles_count - bottom + 3 + exceed
                         redraw(bottom - 3 - exceed - 1)
                     redraw(profiles_count - 1)
                 
@@ -797,7 +805,7 @@ while True:
                         break
                     if pos + 1 + index > bottom - 3:
                         exceed += 1
-                top_displayed += exceed
+                topprof += exceed
                 redraw(pos - 1 - exceed)
             
             case 260:   # arrow left - ←
@@ -809,8 +817,8 @@ while True:
                     picked_cons = set()
                     redraw(highlstr)
                 
-                if highlstr == 0 and top_displayed != 0:
-                    top_displayed = 0
+                if highlstr == 0 and topprof != 0:
+                    topprof = 0
                 redraw(0)
 
             case 261:   # arrow right - →
@@ -913,14 +921,18 @@ while True:
                         lasttab = ind
 
                 newline = re.sub(' {2,}+', '\t', accept_input(preinput=editline, start=0))
-                if not nested:
-                    if len(sort) > 0 and not re.match(sort, newline.split('\t')[0], re.I):
-                        sort = newline[:2].lower()
-                    if newline != profiles[replace_line].strip():
-                        newline = unique_name(newline)
+                if not nested and newline != profiles[replace_line].strip():
+                    newline = unique_name(newline)
 
-                changes.append({replace_line: profiles[replace_line]})
                 profiles[replace_line] = newline + '\n'
+                if not nested and len(sort) > 0 and not re.match(sort, newline.split('\t')[0], re.I):
+                    sort = ''
+                    for char in newline:
+                        first_profile = [i for i in profiles if i[0] != '\t' and re.match(sort + '.*', i, re.I)][0].split('\t')[0].strip()
+                        if newline.split('\t')[0] == first_profile:
+                            break
+                        sort += char.lower()
+                    redraw(0)
                 redraw()
 
             case 26:    # Ctrl+Z reverse applied changes
@@ -934,9 +946,13 @@ while True:
                     insert_point = resolve('conn') + 1
                     changes.append({insert_point: 'delete'})
                     profiles[insert_point:insert_point] = ['\tnew\t10.100.0.0\n']
+                    if highlstr + conn_count + 1 == bottom - 3:
+                        topprof += 1
+                        highlstr -= 1
+                        redraw()
                     redraw(pos + 1)
 
-                profname = sort.lower() + cfg['new_profile'][0].strip()
+                profname = sort.lower() + '_' + cfg['new_profile'][0].strip()
                 hosts = cfg['new_profile'][1:]
                 if len(cfg['default_templ']) > 0 and '\t' not in cfg['new_profile']:
                     profname = f'{profname}\t{cfg["default_templ"]}'
@@ -946,13 +962,17 @@ while True:
 
             case 18:     # Ctrl+R for removing profiles or servers
                 if nested:
-                    if conn_count == 1:
-                        print_message('Removing the only one left host is not safe. consider editing it or removing profile')
-                        continue
-                    profiles.pop(resolve('conn'))
-                    if pos - conn_count == highlstr:  # if removed host was last in the list
-                        redraw(pos - 1)
-                    redraw()
+                    if len(picked_cons) == 0: picked_cons.add(nested_pos)
+                    for conn in sorted(map(lambda x: x + resolve('prof'), picked_cons), reverse=True):
+                        if not profiles[conn + 1].startswith('\t') and not profiles[conn - 1].startswith('\t'):
+                            message = 'Removing the only one left host is not safe. Consider editing it or removing profile'
+                            break
+                        profiles.pop(conn)
+
+                    redrawpoint = highlstr + min(picked_cons) - 1
+                    if redrawpoint == highlstr: redrawpoint += 1
+                    picked_cons = set()
+                    redraw(redrawpoint)
 
                 remove_start_point = resolve('prof')
                 remove_end_point = 0 
@@ -960,7 +980,7 @@ while True:
                     if value[0] != '\t':
                         remove_end_point = remove_start_point + index
                         break
-                    remove_end_point = remove_start_point + index + 1   # this copied only for the case of removal the last profile
+                    remove_end_point = remove_start_point + index + 1   # this copied only for the case of the last profile removal
                 del profiles[remove_start_point:remove_end_point]
                 if highlstr == 0:
                     redraw(breakout=True)
@@ -998,8 +1018,6 @@ while True:
 
             case 21:        # Ctrl+U - Upload(?) a profile from file (only IPs) 
                 filename = autocomplete_loop('File to take IPs from - ', cfg['import_path'] + '/')
-                if filename is None:
-                    continue
                 try:
                     file = open(filename)
                     ips = sorted(set(re.findall(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}', file.read())))

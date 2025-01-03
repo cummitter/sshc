@@ -17,21 +17,16 @@ from time import sleep, time
 from secrets import token_urlsafe
 
 
-focused = False
-nodetails = False
-copied_details = ''
-message = ''
-sort = ''
-nested = 0
-highlstr = 0
-topprof = 0
-topconn = 0
+focused = nodetails = False
+nested = highlstr = topprof = topconn = 0
+copied_details = message = sort = ''
 changes = []
+picked_cons = set()
 gpg = GPG()
 srv = libtmux.Server()
 stop_print = threading.Event()
+lock = threading.Lock()
 tabsize = curses.get_tabsize()
-picked_cons = set()
 
 
 def accept_input(message='', preinput='', start=None):
@@ -442,7 +437,7 @@ def print_profiles(move):
     pntr = 0
     for prof in [i for i in profiles if i[0] != '\t' and re.match(sort + '.*', i, re.I)][topprof:]:
         if pntr + 3 == bottom:
-            break
+            return
 
         if pntr == highlstr:
             if '\t' in prof:
@@ -454,7 +449,7 @@ def print_profiles(move):
                 scr.addstr(pntr, 0, prof, curses.A_BOLD)
 
             conns_to_draw = []
-            if topconn: scr.addstr(pntr, 0, '...'); pntr +=1
+            if topconn: scr.addstr(pntr, 0, '...'); pntr += 1
             for i in profiles[resolve('prof') + 1:]:
                 if not i.startswith('\t'):
                     break
@@ -464,8 +459,11 @@ def print_profiles(move):
                 conns_to_draw.append(i)
             conn_count = len(conns_to_draw)
 
-            for index, conn in enumerate(conns_to_draw):
-                index += 1
+            for index, conn in enumerate(conns_to_draw, 1):
+                if pntr + 4 == bottom:
+                    wrt('bottom line reached for hosts')
+                    scr.addstr(pntr, tabsize, '...')
+                    return
                 pntr += 1
                 params = conn.split('\t')[-1]
                 conn = conn.replace(params, hide_password(params))
@@ -531,6 +529,15 @@ def reset(n=True, h=True, t=True, r=0):
     picked_cons = set()
     redraw(r)
 
+def resize_thread():
+    global bottom, width
+    while True:
+        if (bottom, width) != scr.getmaxyx():
+            lock.acquire()
+            bottom, width =  scr.getmaxyx()
+            redraw(breakout=False)
+            lock.release()
+        sleep(0.01)
 
 # resolve actual position in the profiles list from the relative position on the screen
 def resolve(only_one=None):
@@ -582,16 +589,15 @@ def thread_handler(args):
     global message
     func = args.thread.name
 
+    reason = 'which tracing is not yet implemented'
     if 'create_connection' in func:
         reason = 'during the creation of the connection'
-    elif 'starter' in func:
+    if 'starter' in func:
         reason = 'while sending macroses command to the tmux'
-    elif 'thr_handler' in func:
+    if 'thr_handler' in func:
         reason = 'in the forked process managing'
-    elif '__continuous_print' in func:
+    if '__continuous_print' in func:
         'during the procedure of continious log streaming'
-    else:
-        reason = 'which tracing is not yet implemented'
 
     wrt(func, args.exc_value, '\n')
     message = f'There was an unhandled error {reason}, see log for details'
@@ -740,10 +746,10 @@ bottom, width = scr.getmaxyx()
 log = open(cfg['logfile'], 'w')
 profs_hash = hash(str(profiles))
 curses.curs_set(0)
+threading.Thread(target=resize_thread, daemon=True).start()
 redraw(0, breakout=False)
 
 while True:
-    bottom, width = scr.getmaxyx()
     pos = scr.getyx()[0]
     nested_pos = pos - highlstr
     nodetails = False
@@ -964,9 +970,10 @@ while True:
                 if nested:
                     if len(picked_cons) == 0: picked_cons.add(nested_pos)
                     for conn in sorted(map(lambda x: x + resolve('prof'), picked_cons), reverse=True):
-                        if not profiles[conn + 1].startswith('\t') and not profiles[conn - 1].startswith('\t'):
-                            message = 'Removing the only one left host is not safe. Consider editing it or removing profile'
-                            break
+                        if len(profiles) > conn + 1:
+                            if not profiles[conn + 1].startswith('\t') and not profiles[conn - 1].startswith('\t'):
+                                message = 'Removing the only one left host is not safe. Consider editing it or removing profile'
+                                break
                         profiles.pop(conn)
 
                     redrawpoint = highlstr + min(picked_cons) - 1

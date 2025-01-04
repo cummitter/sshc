@@ -882,7 +882,41 @@ while True:
                     profiles[resolve('prof')] = '\t'.join(line[:1]).strip('\n') + '\t' + copied_details.strip('\n') + '\n'
                 redraw()
 
+            case 35 | 36 | 37 | 94 | 38 | 42 | 40:  # Shift + number (which is in fact an other key sent instead of "shift-appended" number)
+                if not nested:
+                    continue
 
+                if keypress in (35, 36, 37):
+                    num = keypress - 32
+                if keypress == 94:
+                    num = 6
+                if keypress == 38:
+                    num = 7
+                if keypress == 42:
+                    num = 8
+                if keypress == 40:
+                    num = 9
+
+                if num == 3:
+                    for move, conn in enumerate(profiles[resolve('conn'):], 1):
+                        if not conn.startswith('\t'):
+                            for move, conn in enumerate(profiles[resolve('prof'):], 1):
+                                if not conn.startswith('\t'):
+                                    break
+                                if conn.startswith('\t#'):
+                                    redraw(move)
+                            break
+                        if conn.startswith('\t#'):
+                            redraw(nested_pos + move)
+
+                while num + nested_pos not in range(conn_count + 1):
+                    changed = True
+                    num -= conn_count - nested_pos
+                    nested_pos = 0
+                if 'changed' not in locals():
+                    redraw(nested_pos + num)
+                del changed
+                redraw(highlstr + num)
 
             case 10:    # Enter spawns new tmux windows and sends connection commands to them
                 if not nested:
@@ -976,8 +1010,8 @@ while True:
                                 break
                         profiles.pop(conn)
 
-                    redrawpoint = highlstr + min(picked_cons) - 1
-                    if redrawpoint == highlstr: redrawpoint += 1
+                    redrawpoint = highlstr + min(picked_cons)
+                    if max(picked_cons) == conn_count: redrawpoint -= 1
                     picked_cons = set()
                     redraw(redrawpoint)
 

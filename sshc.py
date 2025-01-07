@@ -18,7 +18,7 @@ from secrets import token_urlsafe
 
 
 focused = nodetails = False
-nested = highlstr = topprof = topconn = 0
+nested = highlstr = topprof = topconn = pos = 0
 copied_details = message = sort = ''
 changes = []
 picked_cons = set()
@@ -38,7 +38,7 @@ def accept_input(message='', preinput='', start=None):
         if nodetails:
             start = len('\t'.join(conn.split('\t')[:3]).expandtabs().rstrip()) + tabsize + len(message) 
     print_message(message)
-    editwin = curses.newwin(1, width - 2 - start, pos, start)
+    editwin = curses.newwin(1, width - 2 - start, scr.getyx()[0], start)
     editwin.addstr(preinput)
     curses.curs_set(2)
     scr.refresh()
@@ -95,7 +95,7 @@ def autocomplete_loop(msg, path):
 def conn_params(conn_num=None, prof_index=None, commands=False):
     if prof_index is None:
         prof_index = profiles.index([i for i in profiles if i[0] != '\t' and re.match(sort + '.*', i, re.I)][topprof:][highlstr])
-        conn_index = prof_index + pos - highlstr
+        conn_index = prof_index + pos
     if conn_num is not None:
         conn_index = prof_index + conn_num
 
@@ -420,12 +420,12 @@ def print_message(message_text, offset=tabsize, voffset=0):
             lines[linenum] += word + ' '
 
         message_text = '\n'.join(lines)
-        msgwin = curses.newwin(message_text.count('\n') + 1, width - 10, pos + voffset, print_point)
+        msgwin = curses.newwin(message_text.count('\n') + 1, width - 10, scr.getyx()[0] + voffset, print_point)
         msgwin.addstr(message_text)
         msgwin.refresh()
         return
         
-    scr.addstr(pos + voffset, print_point, message_text)
+    scr.addstr(scr.getyx()[0] + voffset, print_point, message_text)
 
 
 # The only function responsible for printing everything displayed in the screen, called only in redraw()
@@ -507,15 +507,19 @@ def proc_handler(cmd, args, waitfor=None):
         threading.Thread(target=thr_handler, args=[fd, pid, waitfor]).start()
 
 
-def redraw(y_pos=None, breakout=True): 
-    if y_pos is not None and not nested:
-       global highlstr; highlstr = y_pos
-    if y_pos is None:
-        y_pos = pos
+# redraw_pos is used both as a relative reference to hosts inside profile and further changed to an absolute screen position
+def redraw(redraw_pos=None, breakout=True):
+    if redraw_pos is not None and not nested:
+       global highlstr; highlstr = redraw_pos
+    if redraw_pos is not None and nested:
+        global pos; pos = redraw_pos
+        redraw_pos += highlstr
+    if redraw_pos is None:
+        redraw_pos = pos + highlstr if nested else highlstr
     scr.erase()
-    print_profiles(y_pos)
+    print_profiles(redraw_pos)
     scr.addstr(bottom - 2, 4, f'Sort by {sort}.*   Copied details: {copied_details}')
-    scr.move(y_pos, 0)
+    scr.move(redraw_pos, 0)
     scr.refresh()
     if breakout:
         raise AssertionError
@@ -548,8 +552,8 @@ def resolve(only_one=None):
     if only_one == 'prof':
         return prof_index
     if only_one == 'conn':
-        return prof_index + pos - highlstr
-    return prof_index, prof_index + pos - highlstr
+        return prof_index + pos
+    return prof_index, prof_index + pos
 
 
 def tailing_print():
@@ -574,11 +578,11 @@ def __continuous_print():
     lucorner = len('\t'.join(profiles[resolve('conn')].split('\t')[:3]).expandtabs().rstrip()) + tabsize
     if not nested:
         lucorner += tabsize
-    msgwin = curses.newwin(bottom, width - 10, pos, lucorner)
+    msgwin = curses.newwin(bottom, width - 10, scr.getyx()[0], lucorner)
     message = []
     for linenum, line in enumerate(tailf()):
         msgwin.erase()
-        if linenum > bottom - pos - 6:
+        if linenum > bottom - scr.getyx()[0] - 6:
             message.pop(0)
         message.append(line)
         msgwin.addstr(''.join(message))
@@ -749,9 +753,7 @@ curses.curs_set(0)
 threading.Thread(target=resize_thread, daemon=True).start()
 redraw(0, breakout=False)
 
-while True:
-    pos = scr.getyx()[0]
-    nested_pos = pos - highlstr
+while True: 
     nodetails = False
     if message:
         print_message(message)
@@ -769,8 +771,8 @@ while True:
             case 258:   # arrow down - ↓
                 exceed = 0
                 if nested:
-                    if conn_count == nested_pos:
-                        redraw(highlstr + 1)
+                    if conn_count == pos:
+                        redraw(1)
                     redraw(pos + 1)
                 
                 if highlstr + 1 == profiles_count:
@@ -779,21 +781,21 @@ while True:
                 for index, value in enumerate(profiles[resolve('prof') + conn_count + 2:]):
                     if not value.startswith('\t'):
                         break
-                    if pos + 1 + index + 1 >= bottom - 3:
+                    if highlstr + 1 + index + 1 >= bottom - 3:
                         exceed += 1
                 topprof += exceed
-                redraw(pos + 1 - exceed)
+                redraw(highlstr + 1 - exceed)
 
             case 259:   # arrow up - ↑
                 exceed = 0
                 if nested:
-                    if nested_pos == 1:
-                        redraw(highlstr + conn_count)
+                    if pos == 1:
+                        redraw(conn_count)
                     redraw(pos - 1)
 
                 if highlstr - 1 < 0:
                     if topprof != 0:
-                        topprof -=1
+                        topprof -= 1
                         redraw(0)
                     
                     if profiles_count + 1 > bottom - 3:
@@ -809,46 +811,45 @@ while True:
                 for index, value in enumerate(reversed(profiles[:resolve('prof')])):
                     if not value.startswith('\t'):
                         break
-                    if pos + 1 + index > bottom - 3:
+                    if highlstr + 1 + index > bottom - 3:
                         exceed += 1
                 topprof += exceed
-                redraw(pos - 1 - exceed)
+                redraw(highlstr - 1 - exceed)
             
             case 260:   # arrow left - ←
                 if nested:
-                    if nested_pos in picked_cons:
-                        picked_cons.remove(nested_pos)
+                    if pos in picked_cons:
+                        picked_cons.remove(pos)
                         redraw()
                     nested = 0
                     picked_cons = set()
                     redraw(highlstr)
                 
-                if highlstr == 0 and topprof != 0:
-                    topprof = 0
+                if highlstr == 0 and topprof != 0: topprof = 0
                 redraw(0)
 
             case 261:   # arrow right - →
                 if not nested:
                     nested = 1
-                    redraw(pos + 1)
-                picked_cons.add(nested_pos)
+                    redraw(1)
+                picked_cons.add(pos)
                 redraw()
 
             case 336:   # Shift + arrow down for mass host selection
                 if nested:
-                    selected = [i for i in range(nested_pos, conn_count + 1) if not profiles[resolve('prof') + i].startswith('\t#')]
+                    selected = [i for i in range(pos, conn_count + 1) if not profiles[resolve('prof') + i].startswith('\t#')]
                     if len(selected) > cfg['select_multiplier']:
                         selected = selected[:cfg['select_multiplier']]
                     picked_cons.update(selected)
-                    redraw(highlstr + selected[-1])
+                    redraw(selected[-1])
 
             case 337:   # Shift + arrow up (same as above)
                 if nested:
-                    selected = [i for i in range(1, nested_pos + 1) if not profiles[resolve('prof') + i].startswith('\t#')]
+                    selected = [i for i in range(1, pos + 1) if not profiles[resolve('prof') + i].startswith('\t#')]
                     if len(selected) > cfg['select_multiplier']:
                         selected = selected[cfg['select_multiplier'] * -1:]
                     picked_cons.update(selected)
-                    redraw(highlstr + selected[0])
+                    redraw(selected[0])
 
             case 393:   # Shift + arrow left for copying host's details
                 line = profiles[resolve('conn')]
@@ -863,7 +864,7 @@ while True:
             case 402:   # Shift + arrow right for applying copied details (can be used on many)
                 if nested:
                     if len(picked_cons) == 0:
-                        picked_cons.add(nested_pos)
+                        picked_cons.add(pos)
 
                     for conn in picked_cons:
                         line = profiles[resolve('prof') + conn].split('\t')
@@ -898,25 +899,21 @@ while True:
                     num = 9
 
                 if num == 3:
-                    for move, conn in enumerate(profiles[resolve('conn'):], 1):
+                    for move, conn in enumerate(profiles[resolve('conn'):], pos + 1):
                         if not conn.startswith('\t'):
-                            for move, conn in enumerate(profiles[resolve('prof'):], 1):
+                            for move, conn in enumerate(profiles[resolve('prof') + 1:], 2):
                                 if not conn.startswith('\t'):
                                     break
                                 if conn.startswith('\t#'):
                                     redraw(move)
                             break
                         if conn.startswith('\t#'):
-                            redraw(nested_pos + move)
+                            redraw(move)
 
-                while num + nested_pos not in range(conn_count + 1):
-                    changed = True
-                    num -= conn_count - nested_pos
-                    nested_pos = 0
-                if 'changed' not in locals():
-                    redraw(nested_pos + num)
-                del changed
-                redraw(highlstr + num)
+                while num + pos not in range(conn_count + 1):
+                    num -= conn_count - pos
+                    pos = 0
+                redraw(pos + num)
 
             case 10:    # Enter spawns new tmux windows and sends connection commands to them
                 if not nested:
@@ -1002,7 +999,7 @@ while True:
 
             case 18:     # Ctrl+R for removing profiles or servers
                 if nested:
-                    if len(picked_cons) == 0: picked_cons.add(nested_pos)
+                    if len(picked_cons) == 0: picked_cons.add(pos)
                     for conn in sorted(map(lambda x: x + resolve('prof'), picked_cons), reverse=True):
                         if len(profiles) > conn + 1:
                             if not profiles[conn + 1].startswith('\t') and not profiles[conn - 1].startswith('\t'):
@@ -1010,7 +1007,7 @@ while True:
                                 break
                         profiles.pop(conn)
 
-                    redrawpoint = highlstr + min(picked_cons)
+                    redrawpoint = min(picked_cons)
                     if max(picked_cons) == conn_count: redrawpoint -= 1
                     picked_cons = set()
                     redraw(redrawpoint)
@@ -1025,7 +1022,7 @@ while True:
                 del profiles[remove_start_point:remove_end_point]
                 if highlstr == 0:
                     redraw(breakout=True)
-                redraw(pos - 1)
+                redraw(highlstr - 1)
 
             case 4 | 9:     # Ctrl+D | I for duplicating (connections only). I increases last octet and turns out that <TAB> is also Ctrl+I???
                 if not nested:
@@ -1202,10 +1199,10 @@ while True:
                     continue
                 conn_index = resolve('conn')
                 first_index = conn_index - conn_count + 1
-                if pos - highlstr == conn_count:
+                if pos == conn_count:
                     profiles[first_index:first_index] = [profiles[conn_index]]
                     profiles.pop(conn_index + 1)
-                    redraw(pos - conn_count + 1)
+                    redraw(1)
                 profiles[conn_index], profiles[conn_index + 1] = profiles[conn_index + 1], profiles[conn_index]
                 redraw(pos + 1)
 
@@ -1214,10 +1211,10 @@ while True:
                     continue
                 conn_index = resolve('conn')
                 last_index = conn_index + conn_count
-                if pos - 1 == highlstr:
+                if pos == 1:
                     profiles[last_index:last_index] = [profiles[conn_index]]
                     profiles.pop(conn_index)
-                    redraw(pos + conn_count - 1)
+                    redraw(conn_count)
                 profiles[conn_index], profiles[conn_index - 1] = profiles[conn_index - 1], profiles[conn_index]
                 redraw(pos - 1)
 
@@ -1251,7 +1248,7 @@ while True:
         redraw(breakout=False)
         print_message('There was a not-so critical error with the screen rendering')
         wrt(traceback.format_exc())
-    except AssertionError:  # Exception raised intentionally for handling input canceling in one place
+    except AssertionError:  # Exception raised intentionally to avoid unnecessary if statements
         pass
     except Exception:
         redraw(0, breakout=False)

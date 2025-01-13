@@ -252,7 +252,7 @@ def macros(signal, frame):
         if '(' in firstwords:
             keys.append(48)
             if keys[nestlevel] == 58:
-                keys[nestlevel] = 97
+                keys[nestlevel] = 97    # Shift to the a-z part of ASCII after all digits were used
 
             name = line.replace('(', '')
             cmd += f'"{name}" {chr(keys[nestlevel])} {{menu -T {name} -x R -y 0 '
@@ -328,12 +328,12 @@ def neighbors(signal, frame):
             os.system(f"tmux display-message -d 3000 'Could not parse chosen host configuration' 2>/dev/null")
 
 
+# Currently bugged asf, for some reason libtmux library thinks, that session already exist
+# even if tmux server is freshly started, while it can't be found in the list of sessions`
 def new_win(name):
-    try:
-        sesh = srv.new_session('managed_session')
-    except libtmux.exc.TmuxSessionExists:
-        sesh = [s for s in srv.sessions if s.session_name == 'managed_session'][0]
-    return sesh.new_window(name)
+    if 'managed_session' in [sesh.name for sesh in srv.sessions]:
+        return [sesh for sesh in srv.sessions if sesh.name == 'managed_session'][0].new_window(name)
+    return srv.new_session('managed_session').new_window(name)
 
 
 def normalexit(signal, frame):
@@ -1197,25 +1197,40 @@ while True:
             case 534:   # Ctrl+↓ for moving connections inside profile
                 if not nested:
                     continue
-                conn_index = resolve('conn')
-                first_index = conn_index - conn_count + 1
+                if len(picked_cons) == 0: picked_cons.add(pos)
+                start = resolve('prof')
+                for conn in sorted(picked_cons, reverse=True):
+                    conn_index = start + conn
+                    if conn == conn_count:
+                        profiles[start+1:start+1] = [profiles[conn_index]]
+                        profiles.pop(conn_index + 1)
+                        break
+                    profiles[conn_index], profiles[conn_index + 1] = profiles[conn_index + 1], profiles[conn_index]
+                picked_cons = set(map(lambda x: x + 1, picked_cons))
+                if max(picked_cons) > conn_count:
+                    picked_cons.remove(conn_count + 1); picked_cons.add(1)
                 if pos == conn_count:
-                    profiles[first_index:first_index] = [profiles[conn_index]]
-                    profiles.pop(conn_index + 1)
                     redraw(1)
-                profiles[conn_index], profiles[conn_index + 1] = profiles[conn_index + 1], profiles[conn_index]
                 redraw(pos + 1)
 
             case 575:   # Ctrl+↑
                 if not nested:
                     continue
-                conn_index = resolve('conn')
-                last_index = conn_index + conn_count
+                if len(picked_cons) == 0: picked_cons.add(pos)
+                start = resolve('prof')
+                end = start + conn_count
+                for conn in sorted(picked_cons):
+                    conn_index = start + conn
+                    if conn == 1:
+                        profiles[end+1:end+1] = [profiles[conn_index]]
+                        profiles.pop(conn_index)
+                        break
+                    profiles[conn_index], profiles[conn_index - 1] = profiles[conn_index - 1], profiles[conn_index]
+                picked_cons = set(map(lambda x: x - 1, picked_cons))
+                if min(picked_cons) == 0:
+                    picked_cons.remove(0); picked_cons.add(conn_count)
                 if pos == 1:
-                    profiles[last_index:last_index] = [profiles[conn_index]]
-                    profiles.pop(conn_index)
                     redraw(conn_count)
-                profiles[conn_index], profiles[conn_index - 1] = profiles[conn_index - 1], profiles[conn_index]
                 redraw(pos - 1)
 
             case 569:   # Ctrl-→ for revealing the set of commands, that will be used for connection

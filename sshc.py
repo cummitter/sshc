@@ -18,7 +18,7 @@ from secrets import token_urlsafe
 
 
 focused = nodetails = False
-nested = highlstr = topprof = topconn = pos = 0
+nested = highlstr = topprof = topconn = pos = visible_conn_count = conn_count = 0
 copied_details = message = sort = ''
 changes = []
 picked_cons = set()
@@ -428,10 +428,10 @@ def print_message(message_text, offset=tabsize, voffset=0):
     scr.addstr(scr.getyx()[0] + voffset, print_point, message_text)
 
 
-# The only function responsible for printing everything displayed in the screen, called only in redraw()
+# The only function responsible for printing everything displayed on the screen, called only in redraw()
 # It has been proved to be easier to redraw everything with each motion
 def print_profiles(move):
-    global profiles_count, conn_count
+    global profiles_count, conn_count, visible_conn_count
     profiles_count = len([i for i in profiles if i[0] != '\t' and re.match(sort + '.*', i, re.I)][topprof:])
     
     pntr = 0
@@ -448,32 +448,35 @@ def print_profiles(move):
             else:
                 scr.addstr(pntr, 0, prof, curses.A_BOLD)
 
+            conn_list = []
             conns_to_draw = []
-            if topconn: scr.addstr(pntr, 0, '...'); pntr += 1
             for i in profiles[resolve('prof') + 1:]:
-                if not i.startswith('\t'):
+                if not i.startswith('\t'): break
+                conn_list.append(i)
+            conn_count = len(conn_list)
+            
+            for counter, i in enumerate(conn_list[topconn:]):
+                if counter == max_displayed:
                     break
-                if nodetails:
-                    conns_to_draw.append('\t'.join(i.split('\t')[:3]))
-                    continue
-                conns_to_draw.append(i)
-            conn_count = len(conns_to_draw)
+                conns_to_draw.append('\t'.join(i.split('\t')[:3]) if nodetails else i)
+
+            if conns_to_draw[0] != conn_list[0]: conns_to_draw[0] = '\t...'
+            if conns_to_draw[-1] != conn_list[-1]: conns_to_draw[-1] = '\t...'
+            visible_conn_count = len(list(filter(lambda x: x != '\t...', conns_to_draw)))
 
             for index, conn in enumerate(conns_to_draw, 1):
-                if pntr + 4 == bottom:
-                    wrt('bottom line reached for hosts')
-                    scr.addstr(pntr, tabsize, '...')
+                if pntr == bottom - 4:
                     return
                 pntr += 1
                 params = conn.split('\t')[-1]
                 conn = conn.replace(params, hide_password(params))
-                if index in picked_cons:
+                if index + topconn in picked_cons and conn != '\t...\n':
                     if index == move - highlstr:
                         scr.addstr(pntr, 4, conn, curses.A_REVERSE)
                         continue
                     scr.addstr(pntr, 0, conn, curses.A_REVERSE)
                     continue
-                if index == move - highlstr:
+                if index == move - highlstr :
                     scr.addstr(pntr, 8, conn[1:], curses.A_REVERSE)
                     continue
 
@@ -534,11 +537,12 @@ def reset(n=True, h=True, t=True, r=0):
     redraw(r)
 
 def resize_thread():
-    global bottom, width
+    global bottom, width, max_displayed
     while True:
         if (bottom, width) != scr.getmaxyx():
             lock.acquire()
-            bottom, width =  scr.getmaxyx()
+            bottom, width = scr.getmaxyx()
+            max_displayed = int(cfg['max_conn_displayed']) if bottom - 3 > int(cfg['max_conn_displayed']) else bottom - 3
             redraw(breakout=False)
             lock.release()
         sleep(0.01)
@@ -670,7 +674,8 @@ cfg = {
     'upload_from_dest': os.path.expanduser('~'),
     'src_tunnel_port': '8080',
     'dst_tunnel_port': '1521',
-    'new_profile': ['New profile\n', '\tnew\t10.100.0.0\n']
+    'new_profile': ['New profile\n', '\tnew\t10.100.0.0\n'],
+    'max_conn_displayed': 30
 }
 
 lines = [l for l in config_file.readlines() if not l.startswith('#') and l != '\n']
@@ -747,6 +752,7 @@ except:
     pass
 
 bottom, width = scr.getmaxyx()
+max_displayed = int(cfg['max_conn_displayed']) if bottom - 3 > int(cfg['max_conn_displayed']) else bottom - 3
 log = open(cfg['logfile'], 'w')
 profs_hash = hash(str(profiles))
 curses.curs_set(0)
@@ -771,7 +777,13 @@ while True:
             case 258:   # arrow down - ↓
                 exceed = 0
                 if nested:
-                    if conn_count == pos:
+                    if visible_conn_count + int(bool(topconn)) == pos:
+                        if topconn + visible_conn_count == conn_count - 1:
+                            topconn = 0
+                            redraw(1)
+                        if visible_conn_count < conn_count:
+                            topconn += 1
+                            redraw()
                         redraw(1)
                     redraw(pos + 1)
                 
@@ -779,7 +791,7 @@ while True:
                     redraw(0)
                 
                 for index, value in enumerate(profiles[resolve('prof') + conn_count + 2:]):
-                    if not value.startswith('\t'):
+                    if not value.startswith('\t') or index == max_displayed:
                         break
                     if highlstr + 1 + index + 1 >= bottom - 3:
                         exceed += 1
@@ -789,6 +801,13 @@ while True:
             case 259:   # arrow up - ↑
                 exceed = 0
                 if nested:
+                    if visible_conn_count < conn_count:
+                        if pos == 1:
+                            topconn = conn_count - visible_conn_count - 1
+                            redraw(visible_conn_count + 1)
+                        if pos == 2 and topconn:
+                            topconn -= 1
+                            redraw(pos)
                     if pos == 1:
                         redraw(conn_count)
                     redraw(pos - 1)
@@ -800,16 +819,15 @@ while True:
                     
                     if profiles_count + 1 > bottom - 3:
                         for index, value in enumerate(reversed(profiles)):
-                            if not value.startswith('\t'):
+                            if not value.startswith('\t') or index == max_displayed:
                                 break
                             exceed += 1
                         topprof += profiles_count - bottom + 3 + exceed
                         redraw(bottom - 3 - exceed - 1)
                     redraw(profiles_count - 1)
                 
-                exceed = 0
                 for index, value in enumerate(reversed(profiles[:resolve('prof')])):
-                    if not value.startswith('\t'):
+                    if not value.startswith('\t') or index == max_displayed:
                         break
                     if highlstr + 1 + index > bottom - 3:
                         exceed += 1
@@ -818,11 +836,12 @@ while True:
             
             case 260:   # arrow left - ←
                 if nested:
-                    if pos in picked_cons:
-                        picked_cons.remove(pos)
+                    if pos + topconn in picked_cons:
+                        picked_cons.remove(pos + topconn)
                         redraw()
                     nested = 0
                     picked_cons = set()
+                    topconn = 0
                     redraw(highlstr)
                 
                 if highlstr == 0 and topprof != 0: topprof = 0
@@ -832,15 +851,18 @@ while True:
                 if not nested:
                     nested = 1
                     redraw(1)
-                picked_cons.add(pos)
+                picked_cons.add(pos + topconn)
                 redraw()
 
             case 336:   # Shift + arrow down for mass host selection
                 if nested:
-                    selected = [i for i in range(pos, conn_count + 1) if not profiles[resolve('prof') + i].startswith('\t#')]
+                    selected = [i for i in range(pos + topconn, conn_count + 1) if not profiles[resolve('prof') + i].startswith('\t#')]
                     if len(selected) > cfg['select_multiplier']:
                         selected = selected[:cfg['select_multiplier']]
                     picked_cons.update(selected)
+                    if selected[-1] > visible_conn_count:
+                        topconn += 4 - (visible_conn_count - pos + 1)
+                        redraw(visible_conn_count)
                     redraw(selected[-1])
 
             case 337:   # Shift + arrow up (same as above)
@@ -981,12 +1003,10 @@ while True:
             case 14:    # Ctrl+N for adding new profiles and servers
                 if nested:
                     insert_point = resolve('conn') + 1
-                    changes.append({insert_point: 'delete'})
                     profiles[insert_point:insert_point] = ['\tnew\t10.100.0.0\n']
                     if highlstr + conn_count + 1 == bottom - 3:
                         topprof += 1
                         highlstr -= 1
-                        redraw()
                     redraw(pos + 1)
 
                 profname = sort.lower() + '_' + cfg['new_profile'][0].strip()
@@ -994,7 +1014,6 @@ while True:
                 if len(cfg['default_templ']) > 0 and '\t' not in cfg['new_profile']:
                     profname = f'{profname}\t{cfg["default_templ"]}'
                 profiles = [unique_name(profname) + '\n', *hosts] + profiles
-                changes.append({'': 'delete_full'})
                 reset(n=False)
 
             case 18:     # Ctrl+R for removing profiles or servers
@@ -1209,6 +1228,8 @@ while True:
                 picked_cons = set(map(lambda x: x + 1, picked_cons))
                 if max(picked_cons) > conn_count:
                     picked_cons.remove(conn_count + 1); picked_cons.add(1)
+                if len(picked_cons) == 1:
+                    picked_cons = set()
                 if pos == conn_count:
                     redraw(1)
                 redraw(pos + 1)
@@ -1229,6 +1250,8 @@ while True:
                 picked_cons = set(map(lambda x: x - 1, picked_cons))
                 if min(picked_cons) == 0:
                     picked_cons.remove(0); picked_cons.add(conn_count)
+                if len(picked_cons) == 1:
+                    picked_cons = set()
                 if pos == 1:
                     redraw(conn_count)
                 redraw(pos - 1)
@@ -1260,7 +1283,11 @@ while True:
                     continue
         
     except curses.error:
-        redraw(breakout=False)
+        try:
+            reset()
+        except AssertionError:
+            pass
+        #redraw(breakout=False)
         print_message('There was a not-so critical error with the screen rendering')
         wrt(traceback.format_exc())
     except AssertionError:  # Exception raised intentionally to avoid unnecessary if statements

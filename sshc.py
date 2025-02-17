@@ -512,12 +512,14 @@ def proc_handler(cmd, args, waitfor=None):
 
 # redraw_pos is used both as a relative reference to hosts inside profile and further changed to an absolute screen position
 def redraw(redraw_pos=None, breakout=True):
-    if redraw_pos is not None and not nested:
-       global highlstr; highlstr = redraw_pos
-    if redraw_pos is not None and nested:
-        global pos; pos = redraw_pos
-        redraw_pos += highlstr
-    if redraw_pos is None:
+    global pos, highlstr
+    if redraw_pos is not None:
+        if nested:
+            pos = redraw_pos
+            redraw_pos += highlstr
+        else:
+            highlstr = redraw_pos
+    else:
         redraw_pos = pos + highlstr if nested else highlstr
     scr.erase()
     print_profiles(redraw_pos)
@@ -556,8 +558,8 @@ def resolve(only_one=None):
     if only_one == 'prof':
         return prof_index
     if only_one == 'conn':
-        return prof_index + pos
-    return prof_index, prof_index + pos
+        return prof_index + pos + topconn
+    return prof_index, prof_index + pos + topconn
 
 
 def tailing_print():
@@ -795,6 +797,9 @@ while True:
                         break
                     if highlstr + 1 + index + 1 >= bottom - 3:
                         exceed += 1
+                if exceed > highlstr + 1:
+                    topprof = highlstr + 1
+                    redraw()
                 topprof += exceed
                 redraw(highlstr + 1 - exceed)
 
@@ -860,18 +865,29 @@ while True:
                     if len(selected) > cfg['select_multiplier']:
                         selected = selected[:cfg['select_multiplier']]
                     picked_cons.update(selected)
-                    if selected[-1] > visible_conn_count:
-                        topconn += 4 - (visible_conn_count - pos + 1)
-                        redraw(visible_conn_count)
-                    redraw(selected[-1])
+
+                    if pos + len(selected) > visible_conn_count:
+                        if len(selected) + pos + topconn >= conn_count:
+                            topconn = conn_count - max_displayed
+                            redraw(selected[-1] - topconn)
+                        topconn += len(selected) - (visible_conn_count - pos + 1 + int(bool(topconn)))
+                        redraw(max_displayed - 1)
+                    redraw(selected[-1] - topconn)
 
             case 337:   # Shift + arrow up (same as above)
                 if nested:
-                    selected = [i for i in range(1, pos + 1) if not profiles[resolve('prof') + i].startswith('\t#')]
+                    selected = [i for i in range(pos + topconn, 0, -1) if not profiles[resolve('prof') + i].startswith('\t#')]
                     if len(selected) > cfg['select_multiplier']:
-                        selected = selected[cfg['select_multiplier'] * -1:]
+                        selected = selected[:cfg['select_multiplier']]
                     picked_cons.update(selected)
-                    redraw(selected[0])
+
+                    if topconn and pos - len(selected) < 2:
+                        if len(selected) >= topconn + pos:
+                            topconn = 0
+                            redraw(1)
+                        topconn -= len(selected) - pos + 1
+                        redraw(2)
+                    redraw(selected[-1] - topconn)
 
             case 393:   # Shift + arrow left for copying host's details
                 line = profiles[resolve('conn')]

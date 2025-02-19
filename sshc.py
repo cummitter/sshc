@@ -530,10 +530,11 @@ def redraw(redraw_pos=None, breakout=True):
         raise AssertionError
 
 
-def reset(n=True, h=True, t=True, r=0):
-    global nested, highlstr, topprof, picked_cons
+def reset(n=True, h=True, c=True, t=True, r=0):
+    global nested, highlstr, topconn, topprof, picked_cons
     nested = 0 if n else None
     highlstr = 0 if h else None
+    topconn = 0 if c else None
     topprof = 0 if t else None
     picked_cons = set()
     redraw(r)
@@ -925,6 +926,7 @@ while True:
                 if not nested:
                     continue
 
+                jump = 0
                 if keypress in (35, 36, 37):
                     num = keypress - 32
                 if keypress == 94:
@@ -937,21 +939,29 @@ while True:
                     num = 9
 
                 if num == 3:
-                    for move, conn in enumerate(profiles[resolve('conn'):], pos + 1):
+                    for move, conn in enumerate(profiles[resolve('conn'):], pos + topconn):
                         if not conn.startswith('\t'):
                             for move, conn in enumerate(profiles[resolve('prof') + 1:], 2):
                                 if not conn.startswith('\t'):
                                     break
                                 if conn.startswith('\t#'):
-                                    redraw(move)
+                                    jump = move
+                                    break
                             break
                         if conn.startswith('\t#'):
-                            redraw(move)
+                            jump = move
+                
+                if not jump:    # if shift+3 (code above) didn't find a comment to jump to
+                    jump = pos + topconn + num
+                if jump > conn_count:
+                    jump = jump - conn_count
+                    if jump < max_displayed:
+                        topconn = 0
 
-                while num + pos not in range(conn_count + 1):
-                    num -= conn_count - pos
-                    pos = 0
-                redraw(pos + num)
+                if jump - topconn < max_displayed: 
+                    redraw(jump - topconn)
+                topconn = jump - max_displayed
+                redraw(max_displayed - 1)
 
             case 10:    # Enter spawns new tmux windows and sends connection commands to them
                 if not nested:

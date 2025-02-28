@@ -476,7 +476,7 @@ def print_profiles(move):
                         continue
                     scr.addstr(pntr, 0, conn, curses.A_REVERSE)
                     continue
-                if index == move - highlstr :
+                if index == move - highlstr:
                     scr.addstr(pntr, 8, conn[1:], curses.A_REVERSE)
                     continue
 
@@ -510,21 +510,46 @@ def proc_handler(cmd, args, waitfor=None):
         threading.Thread(target=thr_handler, args=[fd, pid, waitfor]).start()
 
 
-# redraw_pos is used both as a relative reference to hosts inside profile and further changed to an absolute screen position
-def redraw(redraw_pos=None, breakout=True):
-    global pos, highlstr
-    if redraw_pos is not None:
+
+# An essential function, used both for rerendering the whole screen and handling all the movement in its vast complexity
+# Over the time of development it has accumulated all of the general activities so the main loop cases can be looked on
+# and understanded much more easily with as least repetead code (all edge cases are also handled here)
+# All of the abstraction from which main loop gains simplicity is handled in this god forsaken place
+
+def redraw(move=None, breakout=True):
+    global pos, highlstr, topconn
+    if move is not None:
         if nested:
-            pos = redraw_pos
-            redraw_pos += highlstr
+            
+            shown = range(2 if topconn else 1, max_displayed + (0 if move < conn_count else 1))
+            if conn_count < max_displayed: shown = shown[:conn_count]
+
+            if move not in range(1, conn_count + 1):    # if requested move out of range of all hosts under profile
+                while move > conn_count:                # then try to loop around (both whiles also work like if statements)
+                    move = pos = move - conn_count
+                    topconn = 0
+                while move < 1:
+                    topconn = conn_count - visible_conn_count - (1 if conn_count > max_displayed else 0)
+                    pos = conn_count + move
+                    move += max(shown) + (1 if conn_count > max_displayed else 0)
+ 
+            else:
+                if move - topconn not in shown:         # if requested move in the profile's range, but not on the screen
+                    topconn += (move - topconn) - (shown[0] if move - topconn < 2 else shown[-1])
+                    if topconn < 0: topconn = 0
+                pos = move
+                move -= topconn
+            move += highlstr
+        
         else:
-            highlstr = redraw_pos
+            highlstr = move
     else:
-        redraw_pos = pos + highlstr if nested else highlstr
+        move = pos + highlstr - topconn if nested else highlstr
+    
     scr.erase()
-    print_profiles(redraw_pos)
+    print_profiles(move)
     scr.addstr(bottom - 2, 4, f'Sort by {sort}.*   Copied details: {copied_details}')
-    scr.move(redraw_pos, 0)
+    scr.move(move, 0)
     scr.refresh()
     if breakout:
         raise AssertionError
@@ -559,8 +584,8 @@ def resolve(only_one=None):
     if only_one == 'prof':
         return prof_index
     if only_one == 'conn':
-        return prof_index + pos + topconn
-    return prof_index, prof_index + pos + topconn
+        return prof_index + pos
+    return prof_index, prof_index + pos
 
 
 def tailing_print():
@@ -777,17 +802,12 @@ while True:
     
     try:
         match keypress:
+
+        # [Movement and selection] - "reading" actions
+
             case 258:   # arrow down - ↓
                 exceed = 0
                 if nested:
-                    if visible_conn_count + int(bool(topconn)) == pos:
-                        if topconn + visible_conn_count == conn_count - 1:
-                            topconn = 0
-                            redraw(1)
-                        if visible_conn_count < conn_count:
-                            topconn += 1
-                            redraw()
-                        redraw(1)
                     redraw(pos + 1)
                 
                 if highlstr + 1 == profiles_count:
@@ -807,15 +827,6 @@ while True:
             case 259:   # arrow up - ↑
                 exceed = 0
                 if nested:
-                    if visible_conn_count < conn_count:
-                        if pos == 1:
-                            topconn = conn_count - visible_conn_count - 1
-                            redraw(visible_conn_count + 1)
-                        if pos == 2 and topconn:
-                            topconn -= 1
-                            redraw(pos)
-                    if pos == 1:
-                        redraw(conn_count)
                     redraw(pos - 1)
 
                 if highlstr - 1 < 0:
@@ -842,8 +853,8 @@ while True:
             
             case 260:   # arrow left - ←
                 if nested:
-                    if pos + topconn in picked_cons:
-                        picked_cons.remove(pos + topconn)
+                    if pos in picked_cons:
+                        picked_cons.remove(pos)
                         redraw()
                     nested = 0
                     picked_cons = set()
@@ -857,38 +868,218 @@ while True:
                 if not nested:
                     nested = 1
                     redraw(1)
-                picked_cons.add(pos + topconn)
+                picked_cons.add(pos)
                 redraw()
 
-            case 336:   # Shift + arrow down for mass host selection
+            case 35 | 36 | 37 | 94 | 38 | 42 | 40:  # Shift + number (which is in fact an other key sent instead of "shift-appended" number)
+                if not nested:
+                    continue
+
+                jump = 0
+                if keypress in (35, 36, 37):
+                    num = keypress - 32
+                if keypress == 94:
+                    num = 6
+                if keypress == 38:
+                    num = 7
+                if keypress == 42:
+                    num = 8
+                if keypress == 40:
+                    num = 9
+
+                if num == 3:
+                    for move, conn in enumerate(profiles[resolve('conn'):], pos):
+                        if not conn.startswith('\t'):
+                            for move, conn in enumerate(profiles[resolve('prof') + 1:], 2):
+                                if not conn.startswith('\t'):
+                                    break
+                                if conn.startswith('\t#'):
+                                    jump = move
+                                    break
+                            break
+                        if conn.startswith('\t#'):
+                            jump = move
+                
+                redraw(jump if jump != 0 else pos + num)
+
+            case 336 | 337:   # Shift + arrow down/up for mass host selection
                 if nested:
-                    selected = [i for i in range(pos + topconn, conn_count + 1) if not profiles[resolve('prof') + i].startswith('\t#')]
-                    if len(selected) > cfg['select_multiplier']:
-                        selected = selected[:cfg['select_multiplier']]
-                    picked_cons.update(selected)
+                    filtered = []
+                    selected = list(range(pos, conn_count + 1)) if keypress == 336 else list(range(pos, 0, -1))
+                    for i in selected:
+                        if not profiles[resolve('prof') + i].startswith('\t#'):
+                           filtered.append(i)
+                        if len(filtered) == cfg['select_multiplier']:
+                            break
+                    picked_cons.update(filtered)
+                    redraw(filtered[-1])
 
-                    if pos + len(selected) > visible_conn_count:
-                        if len(selected) + pos + topconn >= conn_count:
-                            topconn = conn_count - max_displayed
-                            redraw(selected[-1] - topconn)
-                        topconn += len(selected) - (visible_conn_count - pos + 1 + int(bool(topconn)))
-                        redraw(max_displayed - 1)
-                    redraw(selected[-1] - topconn)
+            case 534:   # Ctrl+↓ for moving connections inside profile
+                if not nested:
+                    continue
+                if len(picked_cons) == 0: picked_cons.add(pos)
+                start = resolve('prof')
+                for conn in sorted(picked_cons, reverse=True):
+                    conn_index = start + conn
+                    if conn == conn_count:
+                        profiles[start+1:start+1] = [profiles[conn_index]]
+                        profiles.pop(conn_index + 1)
+                        break
+                    profiles[conn_index], profiles[conn_index + 1] = profiles[conn_index + 1], profiles[conn_index]
+                picked_cons = set(map(lambda x: x + 1, picked_cons))
+                if max(picked_cons) > conn_count:
+                    picked_cons.remove(conn_count + 1); picked_cons.add(1)
+                if len(picked_cons) == 1:
+                    picked_cons = set()
+                if pos == conn_count:
+                    redraw(1)
+                redraw(pos + 1)
 
-            case 337:   # Shift + arrow up (same as above)
+            case 575:   # Ctrl+↑
+                if not nested:
+                    continue
+                if len(picked_cons) == 0: picked_cons.add(pos)
+                start = resolve('prof')
+                end = start + conn_count
+                for conn in sorted(picked_cons):
+                    conn_index = start + conn
+                    if conn == 1:
+                        profiles[end+1:end+1] = [profiles[conn_index]]
+                        profiles.pop(conn_index)
+                        break
+                    profiles[conn_index], profiles[conn_index - 1] = profiles[conn_index - 1], profiles[conn_index]
+                picked_cons = set(map(lambda x: x - 1, picked_cons))
+                if min(picked_cons) == 0:
+                    picked_cons.remove(0); picked_cons.add(conn_count)
+                if len(picked_cons) == 1:
+                    picked_cons = set()
+                if pos == 1:
+                    redraw(conn_count)
+                redraw(pos - 1)
+             
+            case 569:   # Ctrl-→ for revealing the set of commands, that will be used for connection
+                if not nested:
+                    continue
+                try:
+                    cmds = conn_params(commands=True)
+                except Exception:
+                    print_message(f'There is an error with the connection parsing\n\n{traceback.format_exc()}')
+                    continue
+                nodetails = True
+                redraw(breakout=False)
+                print_message(cmds)
+           
+            case 1:         # Ctrl+A - Select all hosts from the profile
                 if nested:
-                    selected = [i for i in range(pos + topconn, 0, -1) if not profiles[resolve('prof') + i].startswith('\t#')]
-                    if len(selected) > cfg['select_multiplier']:
-                        selected = selected[:cfg['select_multiplier']]
-                    picked_cons.update(selected)
+                    profindex = resolve('prof')
+                    for num in range(1, conn_count + 1):
+                        if not profiles[profindex + num].strip().startswith('#'):
+                            picked_cons.add(num)
+                    redraw()
+            
+            case 16:        # Ctrl+P - Create a continuously updating window with the log file contents in it
+                nodetails = True
+                tailing_print()
 
-                    if topconn and pos - len(selected) < 2:
-                        if len(selected) >= topconn + pos:
-                            topconn = 0
-                            redraw(1)
-                        topconn -= len(selected) - pos + 1
-                        redraw(2)
-                    redraw(selected[-1] - topconn)
+
+        # [Data manipulation] - "writing" actions
+
+            case 5:     # Ctrl+E for editing a string where cursor at
+                replace_line = resolve('prof')
+                if nested:
+                    replace_line = resolve('conn')
+                editline = profiles[replace_line][:-1]
+                
+                lasttab = 0
+                incr = 0
+                for ind, char in enumerate(editline, 1):
+                    ind += incr
+                    if char == '\t':
+                        if len(editline[lasttab:ind]) == len(editline[lasttab:ind].expandtabs()):
+                            editline = editline[:ind - 1] + '  ' + editline[ind:]
+                            incr += 1
+                        lasttab = ind
+
+                newline = re.sub(' {2,}+', '\t', accept_input(preinput=editline, start=0))
+                if not nested and newline != profiles[replace_line].strip():
+                    newline = unique_name(newline)
+
+                profiles[replace_line] = newline + '\n'
+                if not nested and len(sort) > 0 and not re.match(sort, newline.split('\t')[0], re.I):
+                    sort = ''
+                    for char in newline:
+                        first_profile = [i for i in profiles if i[0] != '\t' and re.match(sort + '.*', i, re.I)][0].split('\t')[0].strip()
+                        if newline.split('\t')[0] == first_profile:
+                            break
+                        sort += char.lower()
+                    redraw(0)
+                redraw()
+            
+            case 14:    # Ctrl+N for adding new profiles and servers
+                if nested:
+                    insert_point = resolve('conn') + 1
+                    profiles[insert_point:insert_point] = ['\tnew\t10.100.0.0\n']
+                    if highlstr + conn_count + 1 == bottom - 3:
+                        topprof += 1
+                        highlstr -= 1
+                    #if pos == conn_count:
+                    #    topconn += 1
+                    #    redraw()
+                    redraw(pos + 1)
+
+                profname = sort.lower() + '_' + cfg['new_profile'][0].strip()
+                hosts = cfg['new_profile'][1:]
+                if len(cfg['default_templ']) > 0 and '\t' not in cfg['new_profile']:
+                    profname = f'{profname}\t{cfg["default_templ"]}'
+                profiles = [unique_name(profname) + '\n', *hosts] + profiles
+                reset(n=False)
+
+            case 18:     # Ctrl+R for removing profiles or servers
+                if nested:
+                    if len(picked_cons) == 0: picked_cons.add(pos)
+
+                    for conn in sorted(map(lambda x: x + resolve('prof'), picked_cons), reverse=True):
+                        if topconn and conn in range(conn_count - max_displayed, conn_count + 1):
+                            topconn -= 1
+                        if conn_count == 1:
+                            message = 'Removing the only one left host is not safe. Consider editing it or removing profile'
+                            break
+                        profiles.pop(conn)
+
+                    redrawpoint = min(picked_cons)
+                    if redrawpoint == conn_count: redrawpoint -= 1
+                    picked_cons = set()
+                    redraw(redrawpoint)
+
+                remove_start_point = resolve('prof')
+                remove_end_point = 0 
+                for index, value in enumerate(profiles[remove_start_point + 1:], 1):
+                    if value[0] != '\t':
+                        remove_end_point = remove_start_point + index
+                        break
+                    remove_end_point = remove_start_point + index + 1   # this copied only for the case of the last profile removal
+                del profiles[remove_start_point:remove_end_point]
+                if highlstr == 0:
+                    redraw()
+                redraw(highlstr - 1)
+
+            case 4 | 9:     # Ctrl+D | I for duplicating (connections only). I increases last octet and turns out that <TAB> is also Ctrl+I???
+                if not nested:
+                    continue
+                copy_point = resolve('conn')
+                copy = profiles[copy_point]
+                if keypress == 9:
+                    try:    # try to increment the last octet of the IP address
+                        origip = incrip = profiles[copy_point].strip().split('\t')[1]
+                        last_octet = int(origip.split('.')[3])
+                        if last_octet < 255:
+                            incrip = re.sub(r'\d+(\n)?$', rf'{str(last_octet + 1)}\g<1>', incrip)
+                            copy = copy.replace(origip, incrip)
+                    except Exception:
+                        wrt(traceback.format_exc())
+                profiles[copy_point+1:copy_point] = [copy]
+                redraw(pos + 1)
+
 
             case 393:   # Shift + arrow left for copying host's details
                 line = profiles[resolve('conn')]
@@ -921,47 +1112,15 @@ while True:
                 else:
                     profiles[resolve('prof')] = '\t'.join(line[:1]).strip('\n') + '\t' + copied_details.strip('\n') + '\n'
                 redraw()
+            
+            case 26:    # Ctrl+Z reverse applied changes
+                pass
 
-            case 35 | 36 | 37 | 94 | 38 | 42 | 40:  # Shift + number (which is in fact an other key sent instead of "shift-appended" number)
-                if not nested:
-                    continue
+            case 27:    # Alt+Z reverse reversed changes
+                pass
 
-                jump = 0
-                if keypress in (35, 36, 37):
-                    num = keypress - 32
-                if keypress == 94:
-                    num = 6
-                if keypress == 38:
-                    num = 7
-                if keypress == 42:
-                    num = 8
-                if keypress == 40:
-                    num = 9
 
-                if num == 3:
-                    for move, conn in enumerate(profiles[resolve('conn'):], pos + topconn):
-                        if not conn.startswith('\t'):
-                            for move, conn in enumerate(profiles[resolve('prof') + 1:], 2):
-                                if not conn.startswith('\t'):
-                                    break
-                                if conn.startswith('\t#'):
-                                    jump = move
-                                    break
-                            break
-                        if conn.startswith('\t#'):
-                            jump = move
-                
-                if not jump:    # if shift+3 (code above) didn't find a comment to jump to
-                    jump = pos + topconn + num
-                if jump > conn_count:
-                    jump = jump - conn_count
-                    if jump < max_displayed:
-                        topconn = 0
-
-                if jump - topconn < max_displayed: 
-                    redraw(jump - topconn)
-                topconn = jump - max_displayed
-                redraw(max_displayed - 1)
+        # [External] - "executing" actions
 
             case 10:    # Enter spawns new tmux windows and sends connection commands to them
                 if not nested:
@@ -988,115 +1147,6 @@ while True:
                     pass
                 picked_cons = set()
                 redraw()
-
-            case 5: # Ctrl+E for editing a string where cursor at
-                replace_line = resolve('prof')
-                if nested:
-                    replace_line = resolve('conn')
-                editline = profiles[replace_line][:-1]
-                
-                lasttab = 0
-                incr = 0
-                for ind, char in enumerate(editline, 1):
-                    ind += incr
-                    if char == '\t':
-                        if len(editline[lasttab:ind]) == len(editline[lasttab:ind].expandtabs()):
-                            editline = editline[:ind - 1] + '  ' + editline[ind:]
-                            incr += 1
-                        lasttab = ind
-
-                newline = re.sub(' {2,}+', '\t', accept_input(preinput=editline, start=0))
-                if not nested and newline != profiles[replace_line].strip():
-                    newline = unique_name(newline)
-
-                profiles[replace_line] = newline + '\n'
-                if not nested and len(sort) > 0 and not re.match(sort, newline.split('\t')[0], re.I):
-                    sort = ''
-                    for char in newline:
-                        first_profile = [i for i in profiles if i[0] != '\t' and re.match(sort + '.*', i, re.I)][0].split('\t')[0].strip()
-                        if newline.split('\t')[0] == first_profile:
-                            break
-                        sort += char.lower()
-                    redraw(0)
-                redraw()
-
-            case 26:    # Ctrl+Z reverse applied changes
-                pass
-
-            case 27:    # Alt+Z reverse reversed changes
-                pass
-
-            case 14:    # Ctrl+N for adding new profiles and servers
-                if nested:
-                    insert_point = resolve('conn') + 1
-                    profiles[insert_point:insert_point] = ['\tnew\t10.100.0.0\n']
-                    if highlstr + conn_count + 1 == bottom - 3:
-                        topprof += 1
-                        highlstr -= 1
-                    redraw(pos + 1)
-
-                profname = sort.lower() + '_' + cfg['new_profile'][0].strip()
-                hosts = cfg['new_profile'][1:]
-                if len(cfg['default_templ']) > 0 and '\t' not in cfg['new_profile']:
-                    profname = f'{profname}\t{cfg["default_templ"]}'
-                profiles = [unique_name(profname) + '\n', *hosts] + profiles
-                reset(n=False)
-
-            case 18:     # Ctrl+R for removing profiles or servers
-                if nested:
-                    if len(picked_cons) == 0: picked_cons.add(pos)
-                    for conn in sorted(map(lambda x: x + resolve('prof'), picked_cons), reverse=True):
-                        if len(profiles) > conn + 1:
-                            if not profiles[conn + 1].startswith('\t') and not profiles[conn - 1].startswith('\t'):
-                                message = 'Removing the only one left host is not safe. Consider editing it or removing profile'
-                                break
-                        profiles.pop(conn)
-
-                    redrawpoint = min(picked_cons)
-                    if max(picked_cons) == conn_count: redrawpoint -= 1
-                    picked_cons = set()
-                    redraw(redrawpoint)
-
-                remove_start_point = resolve('prof')
-                remove_end_point = 0 
-                for index, value in enumerate(profiles[remove_start_point + 1:], 1):
-                    if value[0] != '\t':
-                        remove_end_point = remove_start_point + index
-                        break
-                    remove_end_point = remove_start_point + index + 1   # this copied only for the case of the last profile removal
-                del profiles[remove_start_point:remove_end_point]
-                if highlstr == 0:
-                    redraw(breakout=True)
-                redraw(highlstr - 1)
-
-            case 4 | 9:     # Ctrl+D | I for duplicating (connections only). I increases last octet and turns out that <TAB> is also Ctrl+I???
-                if not nested:
-                    continue
-                copy_point = resolve('conn')
-                copy = profiles[copy_point]
-                if keypress == 9:
-                    try:    # try to increment the last octet of the IP address
-                        origip = incrip = profiles[copy_point].strip().split('\t')[1]
-                        last_octet = int(origip.split('.')[3])
-                        if last_octet < 255:
-                            incrip = re.sub(r'\d+(\n)?$', rf'{str(last_octet + 1)}\g<1>', incrip)
-                            copy = copy.replace(origip, incrip)
-                    except Exception:
-                        wrt(traceback.format_exc())
-                profiles[copy_point+1:copy_point] = [copy]
-                redraw(pos + 1)
-
-            case 23:        # Ctrl+W - nuke sort string
-                sort = ''
-                reset()
-
-            case 1:         # Ctrl+A - Select all hosts from the profile
-                if nested:
-                    profindex = resolve('prof')
-                    for num in range(1, conn_count + 1):
-                        if not profiles[profindex + num].strip().startswith('#'):
-                            picked_cons.add(num)
-                    redraw()
 
 
             case 21:        # Ctrl+U - Upload(?) a profile from file (only IPs) 
@@ -1128,10 +1178,6 @@ while True:
                 file.close()
                 reset()
             
-            case 16:        # Ctrl+P - Create a continuously updating window with the log file contents in it
-                nodetails = True
-                tailing_print()
-
             case 12:        # Ctrl+L - Create a background process for tunneling
                 try:
                     hp = conn_params()  # hp - host parameters
@@ -1239,60 +1285,12 @@ while True:
                                   str(hp['port']), str(hp['key']), f'"{hp["pass"]}"', str(hp["user"]), str(filename)], stdout=log, stderr=log)
                 tailing_print()
 
-            case 534:   # Ctrl+↓ for moving connections inside profile
-                if not nested:
-                    continue
-                if len(picked_cons) == 0: picked_cons.add(pos)
-                start = resolve('prof')
-                for conn in sorted(picked_cons, reverse=True):
-                    conn_index = start + conn
-                    if conn == conn_count:
-                        profiles[start+1:start+1] = [profiles[conn_index]]
-                        profiles.pop(conn_index + 1)
-                        break
-                    profiles[conn_index], profiles[conn_index + 1] = profiles[conn_index + 1], profiles[conn_index]
-                picked_cons = set(map(lambda x: x + 1, picked_cons))
-                if max(picked_cons) > conn_count:
-                    picked_cons.remove(conn_count + 1); picked_cons.add(1)
-                if len(picked_cons) == 1:
-                    picked_cons = set()
-                if pos == conn_count:
-                    redraw(1)
-                redraw(pos + 1)
 
-            case 575:   # Ctrl+↑
-                if not nested:
-                    continue
-                if len(picked_cons) == 0: picked_cons.add(pos)
-                start = resolve('prof')
-                end = start + conn_count
-                for conn in sorted(picked_cons):
-                    conn_index = start + conn
-                    if conn == 1:
-                        profiles[end+1:end+1] = [profiles[conn_index]]
-                        profiles.pop(conn_index)
-                        break
-                    profiles[conn_index], profiles[conn_index - 1] = profiles[conn_index - 1], profiles[conn_index]
-                picked_cons = set(map(lambda x: x - 1, picked_cons))
-                if min(picked_cons) == 0:
-                    picked_cons.remove(0); picked_cons.add(conn_count)
-                if len(picked_cons) == 1:
-                    picked_cons = set()
-                if pos == 1:
-                    redraw(conn_count)
-                redraw(pos - 1)
+        # [Sorting string manipulation]
 
-            case 569:   # Ctrl-→ for revealing the set of commands, that will be used for connection
-                if not nested:
-                    continue
-                try:
-                    cmds = conn_params(commands=True)
-                except Exception:
-                    print_message(f'There is an error with the connection parsing\n\n{traceback.format_exc()}')
-                    continue
-                nodetails = True
-                redraw(breakout=False)
-                print_message(cmds)
+            case 23:        # Ctrl+W - nuke sort string
+                sort = ''
+                reset()
 
             case 263:   # backspace removes characters from sorting string
                 sort = sort[:-1]

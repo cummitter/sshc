@@ -289,6 +289,21 @@ def macros(signal, frame):
     macros_file.close()
 
 
+def monitor_process(proc):
+    global message, proc_count
+    while proc.poll() is None:
+        sleep(0.001)
+        continue
+    stdout = proc.stdout.read().decode().strip()
+    if proc.returncode != 0:
+        message += f'Execution of "{extcmd}" as part of "{name}" template has returned a non-zero error code and the following came to the stderr:\n{res.stderr}\n'
+    elif stdout == 0:
+        message += f'Execution of "{extcmd}" as part of "{name}" template was successful but nothing came to stdout\n'
+    cmd = ' '.join(proc.args)
+    for name, commands in cfg['templ_list'].items():
+        cfg['templ_list'][name] = commands.replace(f'#{{{cmd}}}', stdout)
+    proc_count -= 1
+
 # Function is called both for creating a menu in an active pane and as a handler for creating new pane and "populating" it with keys
 # This is required by the fact, that some keys' sending has to be precieved by returned characters, which implementation
 # better to be kept in a single file. $NEIGHBOR enviroment variable is used for comunicating the host to connect to
@@ -728,9 +743,19 @@ if 'templ_list(\n' in lines:
     templs = lines[lines.index('templ_list(\n') + 1:lines.index(')\n')]
     lines = [l for l in lines if l not in lines[lines.index('templ_list(\n'):lines.index(')\n') + 1]]
 
+cmdlist = []
+proc_count = 0
 for templ in list(map(str.strip, templs)):
-    cfg['templ_list'].update([templ.split('=')])
-
+    name, commands = templ.split('=')
+    cfg['templ_list'][name] = commands
+    for extcmd in re.findall(r'#\{(.*?)\}', commands):
+        if extcmd not in cmdlist:
+            cmdlist.append(extcmd)
+            proc = subprocess.Popen(extcmd.split(' '), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            threading.Thread(target=monitor_process, args=[proc], daemon=True).start() 
+            proc_count += 1
+del cmdlist
+        
 if 'new_profile:\n' in lines:
     proflines = [l for l in lines[lines.index('new_profile:\n'):] if '=' not in l]
     lines = [l for l in lines if l not in proflines]
@@ -784,7 +809,6 @@ else:
     profiles = cfg['new_profile']
     message = 'Profiles file was not found (which is normal during the first launch), the new one will be saved after exiting the program'
 
-
 scr = curses.initscr()
 scr.keypad(1)
 curses.noecho()
@@ -801,6 +825,12 @@ profs_hash = hash(str(profiles))
 curses.curs_set(0)
 threading.Thread(target=resize_thread, daemon=True).start()
 redraw(0, breakout=False)
+
+if proc_count > 0:
+    print_message('The application is ready to work, but not all of the template substitution has finished executing')
+    while proc_count > 0:
+        continue
+print_message('Template substitution finished, good to work')
 
 while True: 
     nodetails = False

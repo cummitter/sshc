@@ -277,6 +277,11 @@ def macros(signal, frame):
             for char in '{}"$':
                 command = command.replace(char, f'\\{char}')
             command = command.replace("'", r"\'\"\'\"\'")
+
+            for multisignal in re.findall(r'[^ ]* x\d+', termsignals):
+                signal, multiplier = re.search(r'(.*) x(\d+)', multisignal).groups()
+                termsignals = termsignals.replace(multisignal, (signal + ' ') * int(multiplier))
+
             cmd += f'"{name}" {chr(keys[nestlevel])} "send-keys \\\'{command}\\\'{termsignals}" '
             keys[nestlevel] += 1
     

@@ -301,14 +301,20 @@ def neighbors(signal, frame):
         return
 
     if signal == 10:     # SIGUSR1
+        exclcount = 0
         tmcmd = ['menu', '-x', 'R', '-y', '0']
         for i, conn in enumerate(profiles[index + 1:], 48):
             if not conn.startswith('\t'):
                 break
             conn = conn.strip().split('\t')
-            if i >= 58:
+            if i - exclcount >= 58:
                 i += 39     # Shift to the a-z part of ASCII
-            tmcmd += [f'{conn[0]} {conn[1]}', chr(i), f'set-environment neighbor {chr(i)}; run-shell "pkill sshc -POLL"']
+            if conn[0].startswith('#'):
+                conn[0] = '#{}-' + conn[0]
+                exclcount += 1
+                if len(tmcmd) != 5:
+                    tmcmd.append('')
+            tmcmd += [f'{conn[0]} {conn[1]}', chr(i - exclcount), f'set-environment neighbor {chr(i)}; run-shell "pkill sshc -POLL"']
         pane.cmd(*tmcmd)
         return 0
 

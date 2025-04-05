@@ -18,7 +18,7 @@ from secrets import token_urlsafe
 
 
 focused = nodetails = False
-nested = highlstr = topprof = topconn = pos = visible_conn_count = conn_count = 0
+nested = highlstr = topprof = topconn = pos = conn_count = 0
 copied_details = message = sort = ''
 changes = []
 picked_cons = set()
@@ -431,7 +431,7 @@ def print_message(message_text, offset=tabsize, voffset=0):
 # The only function responsible for printing everything displayed on the screen, called only in redraw()
 # It has been proved to be easier to redraw everything with each motion
 def print_profiles(move):
-    global profiles_count, conn_count, visible_conn_count
+    global profiles_count, conn_count
     profiles_count = len([i for i in profiles if i[0] != '\t' and re.match(sort + '.*', i, re.I)][topprof:])
     
     pntr = 0
@@ -460,9 +460,8 @@ def print_profiles(move):
                     break
                 conns_to_draw.append('\t'.join(i.split('\t')[:3]) if nodetails else i)
 
-            if conns_to_draw[0] != conn_list[0]: conns_to_draw[0] = '\t...'
-            if conns_to_draw[-1] != conn_list[-1]: conns_to_draw[-1] = '\t...'
-            visible_conn_count = len(list(filter(lambda x: x != '\t...', conns_to_draw)))
+            if topconn: conns_to_draw[0] = f'\t...\t{topconn + 1} hosts above'
+            if max_displayed + topconn < conn_count: conns_to_draw[-1] = f'\t...\t{conn_count - max_displayed - topconn + 1} hosts below'
 
             for index, conn in enumerate(conns_to_draw, 1):
                 if pntr == bottom - 4:
@@ -470,7 +469,10 @@ def print_profiles(move):
                 pntr += 1
                 params = conn.split('\t')[-1]
                 conn = conn.replace(params, hide_password(params))
-                if index + topconn in picked_cons and conn != '\t...\n':
+                if conn.startswith('\t...'):
+                    scr.addstr(pntr, 0, conn, curses.A_DIM + curses.A_ITALIC)
+                    continue
+                if index + topconn in picked_cons and not conn.startswith('\t...'):
                     if index == move - highlstr:
                         scr.addstr(pntr, 4, conn, curses.A_REVERSE)
                         continue
@@ -521,7 +523,7 @@ def redraw(move=None, breakout=True):
     if move is not None:
         if nested:
             
-            shown = range(2 if topconn else 1, max_displayed + (0 if move < conn_count else 1))
+            shown = range(2 if topconn else 1, max_displayed + (0 if topconn + max_displayed < conn_count else 1))
             if conn_count < max_displayed: shown = shown[:conn_count]
 
             if move not in range(1, conn_count + 1):    # if requested move out of range of all hosts under profile
@@ -529,13 +531,15 @@ def redraw(move=None, breakout=True):
                     move = pos = move - conn_count
                     topconn = 0
                 while move < 1:
-                    topconn = conn_count - visible_conn_count - (1 if conn_count > max_displayed else 0)
+                    topconn = conn_count - len(shown) - (1 if conn_count > max_displayed else 0)
                     pos = conn_count + move
                     move += max(shown) + (1 if conn_count > max_displayed else 0)
  
             else:
-                if move - topconn not in shown:         # if requested move in the profile's range, but not on the screen
-                    topconn += (move - topconn) - (shown[0] if move - topconn < 2 else shown[-1])
+                if move - topconn > max(shown):         # if requested move in the profile's range, but not on the screen
+                    topconn += (move - topconn) - shown[-1]
+                if move - topconn < min(shown):
+                    topconn -= shown[0] - (move - topconn)
                     if topconn < 0: topconn = 0
                 pos = move
                 move -= topconn
@@ -1017,14 +1021,13 @@ while True:
             
             case 14:    # Ctrl+N for adding new profiles and servers
                 if nested:
-                    insert_point = resolve('conn') + 1
-                    profiles[insert_point:insert_point] = ['\tnew\t10.100.0.0\n']
-                    if highlstr + conn_count + 1 == bottom - 3:
+                    profiles[resolve('conn') + 1:resolve('conn') + 1] = ['\tnew\t10.100.0.0\n']
+                    if highlstr + (pos - topconn) == bottom - 4:
                         topprof += 1
                         highlstr -= 1
-                    #if pos == conn_count:
-                    #    topconn += 1
-                    #    redraw()
+                    conn_count += 1
+                    if (pos - topconn) + 1 >= max_displayed + 1:    # calling redraw() without arguments avoids adjusting of
+                        topconn += 1; pos += 1; redraw()        # pos and topconn variables, for which it is an edge case 
                     redraw(pos + 1)
 
                 profname = sort.lower() + '_' + cfg['new_profile'][0].strip()
@@ -1047,7 +1050,9 @@ while True:
                         profiles.pop(conn)
 
                     redrawpoint = min(picked_cons)
-                    if redrawpoint == conn_count: redrawpoint -= 1
+                    if redrawpoint > conn_count - len(picked_cons):
+                        redrawpoint -= 1
+                    conn_count -= len(picked_cons)
                     picked_cons = set()
                     redraw(redrawpoint)
 

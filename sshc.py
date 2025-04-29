@@ -933,7 +933,10 @@ while True:
                     num = 9
 
                 if num == 3:
-                    for move, conn in enumerate(profiles[resolve('conn'):], pos):
+                    for move, conn in enumerate(profiles[resolve('conn') + 1:], pos + 2):
+                        if conn.startswith('\t#'):
+                            jump = move
+                            break
                         if not conn.startswith('\t'):
                             for move, conn in enumerate(profiles[resolve('prof') + 1:], 2):
                                 if not conn.startswith('\t'):
@@ -942,10 +945,17 @@ while True:
                                     jump = move
                                     break
                             break
-                        if conn.startswith('\t#'):
-                            jump = move
-                
-                redraw(jump if jump != 0 else pos + num)
+
+                    # if a "comment jump" is out of bounds, manually adjust the view
+                    if jump not in range(topconn, max_displayed):
+                        pos = jump
+                        if jump < topconn and jump > 2:
+                            topconn = (jump - 3) if jump > 15 else 0
+                        if jump > topconn + max_displayed - 4:
+                            topconn = jump - max_displayed + 4
+                        redraw()
+
+                    redraw(jump if jump != 0 else pos + num)
 
             case 336 | 337:   # Shift + arrow down/up for mass host selection
                 if nested:
@@ -1124,6 +1134,13 @@ while True:
                     except Exception:
                         wrt(traceback.format_exc())
                 profiles[copy_point+1:copy_point] = [copy]
+
+                if highlstr + (pos - topconn) == bottom - 4:
+                    topprof += 1
+                    highlstr -= 1
+                conn_count += 1
+                if (pos - topconn) + 1 >= max_displayed + 1:    # calling redraw() without arguments avoids adjusting of
+                    topconn += 1; pos += 1; redraw()        # pos and topconn variables, for which it is an edge case 
                 redraw(pos + 1)
 
 

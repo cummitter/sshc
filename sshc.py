@@ -22,6 +22,7 @@ nested = highlstr = topprof = topconn = pos = conn_count = 0
 copied_details = message = sort = ''
 changes = []
 picked_cons = set()
+pattern = re.compile(rf'^{sort}.*|.*\| *{sort}.*', re.I)
 gpg = GPG()
 srv = libtmux.Server()
 stop_print = threading.Event()
@@ -94,7 +95,7 @@ def autocomplete_loop(msg, path):
 
 def conn_params(conn_num=None, prof_index=None, commands=False):
     if prof_index is None:
-        prof_index = profiles.index([i for i in profiles if i[0] != '\t' and re.match(sort + '.*', i, re.I)][topprof:][highlstr])
+        prof_index = profiles.index([i for i in profiles if i[0] != '\t' and pattern.match(i)][topprof:][highlstr])
         conn_index = prof_index + pos
     if conn_num is not None:
         conn_index = prof_index + conn_num
@@ -119,8 +120,10 @@ def conn_params(conn_num=None, prof_index=None, commands=False):
     if len(conn_str) > 2:
         conn_details = conn_str[2]
 
-    for i, pstr in enumerate([prof_details, conn_details]):
-        if i == 1 and pstr.startswith('!'):
+    for pstr in [prof_details, conn_details]:
+        if pstr == '!':
+            params['afterwards'] = pstr = ''
+        if pstr.startswith('!'):
             params['syntax'] = None
             pstr = pstr[1:]
 
@@ -149,10 +152,8 @@ def conn_params(conn_num=None, prof_index=None, commands=False):
     if not commands:
         return params
 
-    command = 'ssh {user}@{address} -p {port}'
-    if params['syntax'] is not None:
-        command = cfg['templ_list'][params['syntax']]
-    elif params['key'] is not None:
+    command = 'ssh {user}@{address} -p {port}' if params['syntax'] is None else cfg['templ_list'][params['syntax']]
+    if params['key'] is not None:
         command += f' -i {params["key"]}'
     for param in params.keys():
         command = command.replace('{'+param+'}', str(params[param]))
@@ -161,7 +162,8 @@ def conn_params(conn_num=None, prof_index=None, commands=False):
     if params['pass'] is not None:
         command.append(f"wf 'assword:' then '{params['pass']}'")
     for i in params['afterwards'].split(', '):
-        command.append(i.strip())
+        if len(i) > 0:
+            command.append(i.strip())
     return command
 
 
@@ -178,24 +180,25 @@ def create_connection(pane, conn_num, prof_index=None):
                 raise AssertionError("Could not parse 'wait for' expression, further execution terminated")
             
             if timeout is None:
-                timeout = cfg['timeout']
+                timeout = cfg['wf_timeout']
             start = time()
             while time() - start < timeout:
                 content = pane.capture_pane(first_line)
                 first_line += len(content)
                 if waitfor in ''.join(content):
                     pane.cmd('send-keys', send + '\n')
+                    sleep(float(cfg['wf_delay']))
                     break
                 sleep(0.01)
             else:
-                break   # If timeout occured, do not to send the rest
+                break   # If timeout occured, do not send the rest
             continue
 
         if not ssh_met and cfg['local_spacing']:
             if command.startswith('ssh'):
                 ssh_met = True
             command = ' ' + command
-        pane.cmd('send-keys', command + '\n')
+        pane.cmd('send-keys', command + '\n' if not command.endswith('!') else command[:-1])
 
 
 def decrypt(file, passphrase=None):
@@ -247,7 +250,7 @@ def macros(signal, frame):
     keys = [48]     # 48 - ASCII code for zero
     nestlevel = 0
     for line in macros_file.readlines():
-        line = line.split('# ')[0].strip()
+        line = line.split('#  ')[0].strip()
         firstwords = ''.join(line.split(' ')[:3])   # hard coded limitation for considering a string as a part of macroses
         if '(' in firstwords:
             keys.append(48)
@@ -458,10 +461,10 @@ def print_message(message_text, offset=tabsize, voffset=0):
 # It has been proved to be easier to redraw everything with each motion
 def print_profiles(move):
     global profiles_count, conn_count
-    profiles_count = len([i for i in profiles if i[0] != '\t' and re.match(sort + '.*', i, re.I)][topprof:])
+    profiles_count = len([i for i in profiles if i[0] != '\t' and pattern.match(i)][topprof:])
     
     pntr = 0
-    for prof in [i for i in profiles if i[0] != '\t' and re.match(sort + '.*', i, re.I)][topprof:]:
+    for prof in [i for i in profiles if i[0] != '\t' and pattern.match(i)][topprof:]:
         if pntr + 3 == bottom:
             return
 
@@ -586,12 +589,13 @@ def redraw(move=None, breakout=True):
 
 
 def reset(n=True, h=True, c=True, t=True, r=0):
-    global nested, highlstr, topconn, topprof, picked_cons
+    global nested, highlstr, topconn, topprof, picked_cons, pattern
     nested = 0 if n else None
     highlstr = 0 if h else None
     topconn = 0 if c else None
     topprof = 0 if t else None
     picked_cons = set()
+    pattern = re.compile(rf'^{sort}.*|.*\| *{sort}.*', re.I)
     redraw(r)
 
 def resize_thread():
@@ -608,7 +612,7 @@ def resize_thread():
 # resolve actual position in the profiles list from the relative position on the screen
 def resolve(only_one=None):
     try:
-        prof_index = profiles.index([i for i in profiles if i[0] != '\t' and re.match(sort + '.*', i, re.I)][topprof:][highlstr])
+        prof_index = profiles.index([i for i in profiles if i[0] != '\t' and pattern.match(i)][topprof:][highlstr])
     except Exception:
         return 0
     if only_one == 'prof':
@@ -722,7 +726,8 @@ cfg = {
     'port': 22,
     'password': 'undefined_password',
     'local_spacing': 0,
-    'timeout': 10,
+    'wf_timeout': 10,
+    'wf_delay': 0,
     'select_multiplier': 4,
     'import_path': '',
     'from_scripts': [],
@@ -949,9 +954,9 @@ while True:
                     # if a "comment jump" is out of bounds, manually adjust the view
                     if jump not in range(topconn, max_displayed):
                         pos = jump
-                        if jump < topconn and jump > 2:
+                        if jump < topconn and jump >= 2:
                             topconn = (jump - 3) if jump > 15 else 0
-                        if jump > topconn + max_displayed - 4:
+                        if jump > topconn + max_displayed:
                             topconn = jump - max_displayed + 4
                         redraw()
 
@@ -1063,7 +1068,7 @@ while True:
                 if not nested and len(sort) > 0 and not re.match(sort, newline.split('\t')[0], re.I):
                     sort = ''
                     for char in newline:
-                        first_profile = [i for i in profiles if i[0] != '\t' and re.match(sort + '.*', i, re.I)][0].split('\t')[0].strip()
+                        first_profile = [i for i in profiles if i[0] != '\t' and pattern.match(i)][0].split('\t')[0].strip()
                         if newline.split('\t')[0] == first_profile:
                             break
                         sort += char.lower()

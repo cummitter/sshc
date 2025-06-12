@@ -10,6 +10,7 @@ import socket
 import subprocess
 import threading
 import traceback
+from copy import deepcopy
 from getpass import getpass
 from gnupg import GPG
 from textpad import Textbox
@@ -17,10 +18,12 @@ from time import sleep, time
 from secrets import token_urlsafe
 
 
-focused = nodetails = False
+alt_pressed = focused = nodetails = False
 nested = highlstr = topprof = topconn = pos = conn_count = 0
 copied_details = message = sort = ''
 changes = []
+redo_changes = []
+buffer_changes = []
 picked_cons = set()
 pattern = re.compile(rf'^{sort}.*|.*\| *{sort}.*', re.I)
 gpg = GPG()
@@ -422,19 +425,19 @@ def normalexit(signal, frame):
     deinitialize_scr()
 
 
-def print_message(message_text, offset=tabsize, voffset=0):
+def print_message(text, offset=tabsize, voffset=0):
     conn = profiles[resolve('conn')]
     print_point = len(conn.expandtabs().rstrip()) + offset
     if nodetails:
         print_point = len('\t'.join(conn.split('\t')[:3]).expandtabs().rstrip()) + offset
-    if isinstance(message_text, list):
-        message_text = ' \n'.join(message_text)
+    if isinstance(text, list):
+        text = ' \n'.join(text)
 
-    if len(message_text) + print_point > width - 10 or '\n' in message_text:    # If message does not visually fits in single line, put it into a rectangled window  
-        redraw(breakout=False)                                                  # and remove the details of surrounding connections if nodetails is set
+    if len(text) + print_point > width - 10 or '\n' in text:    # If message does not visually fits in single line, put it into a rectangled window  
+        #redraw(breakout=False)                                                  # and remove the details of surrounding connections if nodetails is set
         lines = ['']
         linenum = 0
-        for word in message_text.split(' '):
+        for word in text.split(' '):
             if '\n' in word:
                 words = word.split('\n')
                 lines[linenum] += words[0]
@@ -448,13 +451,13 @@ def print_message(message_text, offset=tabsize, voffset=0):
                 linenum += 1
             lines[linenum] += word + ' '
 
-        message_text = '\n'.join(lines)
-        msgwin = curses.newwin(message_text.count('\n') + 1, width - 10, scr.getyx()[0] + voffset, print_point)
-        msgwin.addstr(message_text)
+        text = '\n'.join(lines)
+        msgwin = curses.newwin(text.count('\n') + 1, width - 10, scr.getyx()[0] + voffset, print_point)
+        msgwin.addstr(text)
         msgwin.refresh()
         return
         
-    scr.addstr(scr.getyx()[0] + voffset, print_point, message_text)
+    scr.addstr(scr.getyx()[0] + voffset, print_point, text)
 
 
 # The only function responsible for printing everything displayed on the screen, called only in redraw()
@@ -672,6 +675,65 @@ def thread_handler(args):
     wrt(func, args.exc_value, '\n')
     message = f'There was an unhandled error {reason}, see log for details'
 
+def redo():
+    if not redo_changes:
+        print_message('No changes to revert back')
+        return
+    last_redo = redo_changes[-1]
+    if last_redo['was_nested'] != nested:
+        print_message(f'Last change was reverted at the {"outer" if nested else "inner"} level')
+        return
+    if last_redo['location'][0] not in range(resolve('prof'), conn_count + 1):
+        print_message('Last revert was applied to a different profile')
+        return
+
+    match last_redo['action']:
+        case 'e':
+            for location, value in zip(last_redo['location'], last_redo['value']):
+                profiles[location] = value
+        case 'd':
+            for location in last_redo['location']:
+                del profiles[location]
+        case 'i':
+            for location, value in zip(last_redo['location'], last_redo['value']):
+                profiles[location:location] = [value]
+    changes.append(buffer_changes.pop())
+    redo_changes.pop()
+    redraw(last_redo['location'][0], breakout=False)
+
+def undo(signal, frame):
+    if not changes:
+        print_message('No changes were made so far')
+        return
+    last_change = changes[-1]
+    if last_change['was_nested'] != nested:
+        print_message(f'Last change was applied at the {"outer" if nested else "inner"} level')
+        return
+    if last_change['location'][0] not in range(resolve('prof'), conn_count + 1):
+        print_message('Last change was made to a different profile')
+        return
+
+    redo = deepcopy(changes.pop())
+    buffer_changes.append(deepcopy(redo))
+    match last_change['action']:
+        case 'e':
+            redo['value'].clear()
+            for location, value in zip(last_change['location'], last_change['value']):
+                redo['value'].append(profiles[location])
+                profiles[location] = value
+        case 'd':
+            redo['action'] = 'i'
+            redo['value'] = []
+            for location in last_change['location']:
+                redo['value'].append(profiles[location])
+                del profiles[location]
+        case 'i':
+            redo['action'] = 'd'
+            redo['value'].clear()
+            for location, value in zip(last_change['location'], last_change['value']):
+                profiles[location:location] = [value]
+    redo_changes.append(redo)
+    redraw(last_change['location'][0], breakout=False)
 
 def unique_name(name):
     actualname = ''
@@ -704,6 +766,7 @@ signal.signal(signal.SIGPOLL, neighbors)
 signal.signal(signal.SIGUSR1, neighbors)
 signal.signal(signal.SIGUSR2, macros)
 signal.signal(signal.SIGCHLD, signal.SIG_IGN)
+signal.signal(signal.SIGTSTP, undo)
 threading.excepthook = thread_handler
 
 userdir = os.path.expanduser('~') + '/.sshc'
@@ -735,8 +798,8 @@ cfg = {
     'upload_from_path': '',
     'upload_to_path': '',
     'upload_from_dest': os.path.expanduser('~'),
-    'src_tunnel_port': '8080',
-    'dst_tunnel_port': '1521',
+    'src_tunnel_port': '',
+    'dst_tunnel_port': '',
     'new_profile': ['New profile\n', '\tnew\t10.100.0.0\n'],
     'max_conn_displayed': 30
 }
@@ -760,7 +823,7 @@ for templ in list(map(str.strip, templs)):
             threading.Thread(target=monitor_process, args=[proc], daemon=True).start() 
             proc_count += 1
 del cmdlist
-        
+ 
 if 'new_profile:\n' in lines:
     proflines = [l for l in lines[lines.index('new_profile:\n'):] if '=' not in l]
     lines = [l for l in lines if l not in proflines]
@@ -815,7 +878,7 @@ else:
     message = 'Profiles file was not found (which is normal during the first launch), the new one will be saved after exiting the program'
 
 scr = curses.initscr()
-scr.keypad(1)
+scr.keypad(True)
 curses.noecho()
 curses.cbreak()
 try:
@@ -828,6 +891,7 @@ max_displayed = int(cfg['max_conn_displayed']) if bottom - 3 > int(cfg['max_conn
 log = open(cfg['logfile'], 'w')
 profs_hash = hash(str(profiles))
 curses.curs_set(0)
+curses.meta(True)
 threading.Thread(target=resize_thread, daemon=True).start()
 redraw(0, breakout=False)
 
@@ -843,7 +907,6 @@ while True:
         print_message(message)
         message = None
     keypress = scr.getch() 
-
     if 'print' in str(threading.enumerate()):
         stop_print.set()
         [th for th in threading.enumerate() if 'print' in th.name][0].join()
@@ -1064,6 +1127,7 @@ while True:
                 if not nested and newline != profiles[replace_line].strip():
                     newline = unique_name(newline)
 
+                changes.append({'was_nested': nested, 'action': 'e', 'location': [resolve('conn')], 'value': [profiles[replace_line]]})
                 profiles[replace_line] = newline + '\n'
                 if not nested and len(sort) > 0 and not re.match(sort, newline.split('\t')[0], re.I):
                     sort = ''
@@ -1078,12 +1142,13 @@ while True:
             case 14:    # Ctrl+N for adding new profiles and servers
                 if nested:
                     profiles[resolve('conn') + 1:resolve('conn') + 1] = ['\tnew\t10.100.0.0\n']
+                    changes.append({'was_nested': nested, 'action': 'd', 'location': [resolve('conn') + 1]})
                     if highlstr + (pos - topconn) == bottom - 4:
                         topprof += 1
                         highlstr -= 1
                     conn_count += 1
                     if (pos - topconn) + 1 >= max_displayed + 1:    # calling redraw() without arguments avoids adjusting of
-                        topconn += 1; pos += 1; redraw()        # pos and topconn variables, for which it is an edge case 
+                        topconn += 1; pos += 1; redraw()            # pos and topconn variables, for which it is an edge case 
                     redraw(pos + 1)
 
                 profname = sort.lower() + '_' + cfg['new_profile'][0].strip()
@@ -1096,8 +1161,14 @@ while True:
             case 18:     # Ctrl+R for removing profiles or servers
                 if nested:
                     if len(picked_cons) == 0: picked_cons.add(pos)
+                    picked_resolved = sorted(map(lambda x: x + resolve('prof'), picked_cons), reverse=True)
+                    changes.append({'was_nested': nested,
+                                    'action': 'i',
+                                    'location': picked_resolved,
+                                    'value': [profiles[i] for i in picked_resolved]
+                                    })
 
-                    for conn in sorted(map(lambda x: x + resolve('prof'), picked_cons), reverse=True):
+                    for conn in picked_resolved:
                         if topconn and conn in range(conn_count - max_displayed, conn_count + 1):
                             topconn -= 1
                         if conn_count == 1:
@@ -1119,6 +1190,7 @@ while True:
                         remove_end_point = remove_start_point + index
                         break
                     remove_end_point = remove_start_point + index + 1   # this copied only for the case of the last profile removal
+                changes.append({'was_nested': nested, 'action': 'i', 'location': None, 'value': profiles[remove_start_point:remove_end_point]})
                 del profiles[remove_start_point:remove_end_point]
                 if highlstr == 0:
                     redraw()
@@ -1127,6 +1199,7 @@ while True:
             case 4 | 9:     # Ctrl+D | I for duplicating (connections only). I increases last octet and turns out that <TAB> is also Ctrl+I???
                 if not nested:
                     continue
+                changes.append({'was_nested': nested, 'action': 'd', 'location': [resolve('conn') + 1]})
                 copy_point = resolve('conn')
                 copy = profiles[copy_point]
                 if keypress == 9:
@@ -1161,8 +1234,13 @@ while True:
 
             case 402:   # Shift + arrow right for applying copied details (can be used on many)
                 if nested:
-                    if len(picked_cons) == 0:
-                        picked_cons.add(pos)
+                    if len(picked_cons) == 0: picked_cons.add(pos)
+                    picked_resolved = sorted(map(lambda x: x + resolve('prof'), picked_cons))
+                    changes.append({'was_nested': nested,
+                                    'action': 'e',
+                                    'location': picked_resolved,
+                                    'value': [profiles[i] for i in picked_resolved]
+                                    })
 
                     for conn in picked_cons:
                         line = profiles[resolve('prof') + conn].split('\t')
@@ -1174,18 +1252,16 @@ while True:
                     picked_cons = set()
                     redraw()
 
+                changes.append({'was_nested': nested, 'action': 'e', 'location': [resolve('prof')], 'value': [profiles[resolve('prof')]]})
                 line = profiles[resolve('prof')].split('\t')
                 if copied_details == '':
                     profiles[resolve('prof')] = '\t'.join(line[:1]).strip('\n') + '\n'
                 else:
                     profiles[resolve('prof')] = '\t'.join(line[:1]).strip('\n') + '\t' + copied_details.strip('\n') + '\n'
                 redraw()
-            
-            case 26:    # Ctrl+Z reverse applied changes
-                pass
 
             case 27:    # Alt+Z reverse reversed changes
-                pass
+                alt_pressed = True
 
 
         # [External] - "executing" actions
@@ -1254,7 +1330,7 @@ while True:
                     continue
 
                 defaultport = cfg["src_tunnel_port"]
-                sport = accept_input(message=f'Source port - empty for default {defaultport} and try to increase if already in use or 0 for random: ')
+                sport = accept_input(message=f'Source port (empty for random, will attempt to increase if already in use) - ', preinput=defaultport)
                 if sport == '':
                     sport = defaultport
                 if not sport.isdigit():
@@ -1277,7 +1353,7 @@ while True:
 
                 defaultport = cfg["dst_tunnel_port"]
                 print_message(f'Source port - {sport}', voffset=1)
-                dport = accept_input(message=f'Destination port (empty for default {defaultport}) - ')
+                dport = accept_input(message=f'Destination port - ', preinput=defaultport)
                 if dport == '':
                     dport = defaultport
                 if not dport.isdigit():
@@ -1294,7 +1370,7 @@ while True:
                     if accept_input(message=f'Found an additional host this entry is connecting to, should {optionaltarget} be used as a target one (y is default)? [y/n]: ') in ('', 'y'):
                         targethost = optionaltarget
 
-                ssh_options = f'-4 -f -N -L {sport}:{targethost}:{dport} {hp["user"]}@{hp["address"]} -p {hp["port"]}'
+                ssh_options = f'-4 -N -L {sport}:{targethost}:{dport} {hp["user"]}@{hp["address"]} -p {hp["port"]}'
 
                 if hp['key'] is not None:
                     ssh_options += f' -i {hp["key"]}'
@@ -1365,6 +1441,10 @@ while True:
                 reset()
 
             case _: # rest of the keys for sorting (or ignoring)
+                if keypress == 122 and alt_pressed:
+                    alt_pressed = False
+                    redo()
+                    continue
                 if keypress in list(range(97, 123)) + list(range(65, 91)) + list(range(48, 58)):
                     if nested:
                         sort = chr(keypress)

@@ -10,6 +10,8 @@ import socket
 import subprocess
 import threading
 import traceback
+import warnings
+import sys
 from copy import deepcopy
 from getpass import getpass
 from gnupg import GPG
@@ -21,6 +23,7 @@ from secrets import token_urlsafe
 alt_pressed = focused = nodetails = False
 nested = highlstr = topprof = topconn = pos = conn_count = 0
 copied_details = message = sort = ''
+tunnels = {}
 changes = []
 redo_changes = []
 buffer_changes = []
@@ -31,6 +34,10 @@ srv = libtmux.Server()
 stop_print = threading.Event()
 lock = threading.Lock()
 tabsize = curses.get_tabsize()
+
+# os.forkpty() complains about multi-threaded enviroment, but as far as i've read, deadlocks might appear only 
+# if the forked process runs the same code as its parent, which is not the case here.
+warnings.filterwarnings("ignore", category=DeprecationWarning) 
 
 
 def accept_input(message='', preinput='', start=None):
@@ -521,28 +528,56 @@ def print_profiles(move):
         pntr += 1
 
 
-# war crime happenning. Did not found, or researched enough, to come with a smarter solution
-# function forks a process (with a pty), immediatly gives it a command to execute and starts a thread
-# for reading an output and optionaly reacting to it with a certain input (passwords)
+# war crime happenning, i won't disagree, but apparently, ssh's keyboard interactive auth desparetly needs a tty to attach to (apparently, but obviously)
+# and in the context of curses program, a child process attaches to a parent's tty, while i want password to be sent non-interactively
+# just an os.write() to a processe's FD (because password is either already entered for the host or fetched from the template)
+# That's the whole reason for writing this garbage that manually forks and further monitors the output to react with a password
 def proc_handler(cmd, args, waitfor=None):
-    def thr_handler(fd, pid, waitfor):
-        while True:
-            try:
-                out = os.read(fd, 1024)
-            except (OSError):
-                break
-            wrt(f'[PID - {pid}]' + out.decode())
-            if b'word:' in out and waitfor is not None:
-                os.write(fd, f'{waitfor}\n'.encode())
-                waitfor = None
-            sleep(0.1)
-    
     pid, fd = os.forkpty()
     if pid == 0:
         os.execvp(cmd, args)
     elif pid > 0:
-        threading.Thread(target=thr_handler, args=[fd, pid, waitfor]).start()
+        threading.Thread(target=__proc_watcher, args=[fd, pid, waitfor, (True if '-L' in args else False)], daemon=True).start()
+        tailing_print()
 
+# The second part is only related to the tunnel's monitoring, as its just convinient to create a tunnel with a few keystrokes
+# why not extend this functionality with an ability to both see the tunnel's status and kill/restart it if needed
+def __proc_watcher(fd, pid, waitfor, tunnel):
+    while not (tunnel and not waitfor):
+        try:
+            out = os.read(fd, 1024)
+        except (OSError):
+            wrt(f'{pid} has *probably* finished its execution, as os.read() raised an exception on processe\'s FD')
+            return
+        wrt(f'[PID - {pid}] ' + out.decode())
+        if b'word:' in out and waitfor is not None:
+            os.write(fd, f'{waitfor}\n'.encode())
+            waitfor = None
+        sleep(0.1)
+
+    tunid = max(tunnels.keys())
+    sport = tunnels[tunid][0][:tunnels[tunid][0].index(':')]
+    wrt('[' + tunnels[tunid][0] + ']' + ' -> ' + tunnels[tunid][2])
+    prev = tunnels[tunid][2]
+    while True:
+        sleep(2)
+        try:
+            os.kill(pid, 0)
+            sock = socket.socket()
+            sock.settimeout(10)
+            sock.connect(('127.0.0.1', int(sport)))
+            tunnels[tunid][2] = 'connected'
+            sock.close()
+        except ProcessLookupError:
+            tunnels[tunid][2] = 'killed'
+        except Exception as exc:
+            tunnels[tunid][2] = str(exc.args)
+        finally:
+            if tunnels[tunid][2] != prev:
+                wrt('[' + tunnels[tunid][0] + ']' + ' -> ' + tunnels[tunid][2])
+                prev = tunnels[tunid][2]
+                if prev == 'killed':
+                    break
 
 
 # An essential function, used both for rerendering the whole screen and handling all the movement in its vast complexity
@@ -626,6 +661,7 @@ def resolve(only_one=None):
 
 
 def tailing_print():
+    global nodetails
     nodetails = True
     redraw(breakout=False)
     stop_print.clear()
@@ -752,12 +788,11 @@ def unique_name(name):
     return name
 
 
-def wrt(*values, ex=False):
+def wrt(*values):
     for value in values:
-        log.write(str(value) + '\n')
+        if len(str(value)) > 0:
+            log.write(str(value) + '\n')
     log.flush()
-    if ex:
-        exit()
 
 signal.signal(signal.SIGINT, normalexit)
 signal.signal(signal.SIGHUP, normalexit)
@@ -1323,39 +1358,44 @@ while True:
                 reset()
             
             case 12:        # Ctrl+L - Create a background process for tunneling
+                if not nested:
+                    if not tunnels:
+                        print_message('There is yet no tunnels created through this program')
+                        continue
+                    
+                    print_message('The list of tunnels the program keeps track of:')
+                
                 try:
                     hp = conn_params()  # hp - host parameters
                 except Exception:
                     print_message(f'There is an error with the connection parsing\n\n{traceback.format_exc()}')
                     continue
 
+                __target = ''
                 defaultport = cfg["src_tunnel_port"]
                 sport = accept_input(message=f'Source port (empty for random, will attempt to increase if already in use) - ', preinput=defaultport)
-                if sport == '':
-                    sport = defaultport
-                if not sport.isdigit():
-                    print_message('Entered value is not a number')
-                    continue
-                sport = int(sport)
-                if sport > 65535:
-                    print_message('Entered port out of range of available ports')
-                    continue
-                
-                for num in range(0, 65535 - int(sport)):
-                    try:
-                        s = socket.socket()
-                        s.bind(('', sport + num))
-                        sport = s.getsockname()[1]
-                        s.close()
-                        break
-                    except OSError as e:
+                if sport:
+                    if not sport.isdigit():
+                        print_message('Entered value is not a number')
                         continue
+                    sport = int(sport)
+                    if sport > 65535:
+                        print_message('Entered port out of range of available ports')
+                        continue
+                else: 
+                    for num in range(0, 65535 - int(sport)):
+                        try:
+                            s = socket.socket()
+                            s.bind(('', sport + num))
+                            sport = s.getsockname()[1]
+                            s.close()
+                            break
+                        except OSError as e:
+                            continue
 
                 defaultport = cfg["dst_tunnel_port"]
                 print_message(f'Source port - {sport}', voffset=1)
                 dport = accept_input(message=f'Destination port - ', preinput=defaultport)
-                if dport == '':
-                    dport = defaultport
                 if not dport.isdigit():
                     print_message('Entered value is not a number')
                     continue
@@ -1369,11 +1409,13 @@ while True:
                     optionaltarget = re.search(r'ssh (\w+)', hp['afterwards']).group(1)
                     if accept_input(message=f'Found an additional host this entry is connecting to, should {optionaltarget} be used as a target one (y is default)? [y/n]: ') in ('', 'y'):
                         targethost = optionaltarget
+                        __target = f'{targethost}:{hp["address"]}'
 
                 ssh_options = f'-4 -N -L {sport}:{targethost}:{dport} {hp["user"]}@{hp["address"]} -p {hp["port"]}'
 
                 if hp['key'] is not None:
                     ssh_options += f' -i {hp["key"]}'
+                tunnels[0 if not tunnels else max(tunnels.keys()) + 1] = [f'{sport}:{__target if __target else hp["address"]}:{dport}', ('ssh', ssh_options.split(' '), hp['pass']), 'starting']
                 proc_handler('ssh', ssh_options.split(' '), hp['pass'])
 
             case 11:        # Ctrl+K - Put an identity file in remote host's authorized_keys (should work only if password is defined for connection)

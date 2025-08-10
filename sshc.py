@@ -40,7 +40,7 @@ tabsize = curses.get_tabsize()
 warnings.filterwarnings("ignore", category=DeprecationWarning) 
 
 
-def accept_input(message='', preinput='', start=None):
+def accept_input(message='', preinput='', start=None, voffset=0):
     global nodetails, focused
     focused = True
     if start is None:
@@ -48,7 +48,7 @@ def accept_input(message='', preinput='', start=None):
         start = len(conn.expandtabs().rstrip()) + tabsize + len(message)
         if nodetails:
             start = len('\t'.join(conn.split('\t')[:3]).expandtabs().rstrip()) + tabsize + len(message) 
-    print_message(message)
+    print_message(message, voffset=voffset)
     editwin = curses.newwin(1, width - 2 - start, scr.getyx()[0], start)
     editwin.addstr(preinput)
     curses.curs_set(2)
@@ -376,7 +376,7 @@ def new_win(name):
 
 
 def normalexit(signal, frame):
-    global profiles, key, focused
+    global profiles, key, focused, nodetails
     if focused:
         focused = False
         nodetails = False
@@ -432,7 +432,7 @@ def normalexit(signal, frame):
     deinitialize_scr()
 
 
-def print_message(text, offset=tabsize, voffset=0):
+def print_message(text, offset=tabsize, voffset=0, cursesoptions=0):
     conn = profiles[resolve('conn')]
     print_point = len(conn.expandtabs().rstrip()) + offset
     if nodetails:
@@ -441,7 +441,6 @@ def print_message(text, offset=tabsize, voffset=0):
         text = ' \n'.join(text)
 
     if len(text) + print_point > width - 10 or '\n' in text:    # If message does not visually fits in single line, put it into a rectangled window  
-        #redraw(breakout=False)                                                  # and remove the details of surrounding connections if nodetails is set
         lines = ['']
         linenum = 0
         for word in text.split(' '):
@@ -463,8 +462,8 @@ def print_message(text, offset=tabsize, voffset=0):
         msgwin.addstr(text)
         msgwin.refresh()
         return
-        
-    scr.addstr(scr.getyx()[0] + voffset, print_point, text)
+
+    scr.addstr(scr.getyx()[0] + voffset, print_point, text, cursesoptions)
 
 
 # The only function responsible for printing everything displayed on the screen, called only in redraw()
@@ -559,20 +558,49 @@ def __proc_watcher(fd, pid, waitfor, tunnel):
     sport = tunnels[tunid][0][:tunnels[tunid][0].index(':')]
     wrt('[' + tunnels[tunid][0] + ']' + ' -> ' + tunnels[tunid][2])
     prev = tunnels[tunid][2]
+    alivecheck = 0
     while True:
-        sleep(2)
+        sleep(0.1)
+        alivecheck += 1
         try:
-            os.kill(pid, 0)
-            sock = socket.socket()
-            sock.settimeout(10)
-            sock.connect(('127.0.0.1', int(sport)))
-            tunnels[tunid][2] = 'connected'
-            sock.close()
+            if tunnels[tunid][2].startswith('to be'):       # user request for tunnel to be either killed or restarted
+                os.kill(pid, 9)
+                for i in range(5):
+                    os.kill(pid, 0)
+                    sleep(0.5)
+                wrt(f'[PID - {pid}] is still alive for the past 10 seconds after sending SIGKILL')
+            if alivecheck == 20:
+                alivecheck = 0
+                os.kill(pid, 0)
+                sock = socket.socket()
+                sock.settimeout(10)
+                sock.connect(('127.0.0.1', int(sport)))
+                tunnels[tunid][2] = 'connected'
+                sock.close()
+
         except ProcessLookupError:
-            tunnels[tunid][2] = 'killed'
+            
+            if tunnels[tunid][2].startswith('to be'):
+                wrt(f'[PID - {pid}] was killed by request')
+
+                if tunnels[tunid][2] == 'to be restarted':
+                    params = tunnels[tunid][1]
+                    newtunid = max(tunnels.keys()) + 1
+                    tunnels[newtunid] = tunnels[tunid]
+                    tunnels[newtunid][2] = 'starting'
+                    wrt(f'\nRestarting a tunnel with the following command:\nssh {' '.join(params[0])}')
+                    proc_handler('ssh', *params)
+                tunnels.pop(tunid)
+            
+            else:
+                tunnels[tunid][2] = 'killed'
+        
         except Exception as exc:
             tunnels[tunid][2] = str(exc.args)
+
         finally:
+            if not tunnels.get(tunid):
+                break
             if tunnels[tunid][2] != prev:
                 wrt('[' + tunnels[tunid][0] + ']' + ' -> ' + tunnels[tunid][2])
                 prev = tunnels[tunid][2]
@@ -708,7 +736,7 @@ def thread_handler(args):
     if '__continuous_print' in func:
         'during the procedure of continious log streaming'
 
-    wrt(func, args.exc_value, '\n')
+    wrt(func, args.exc_value)
     message = f'There was an unhandled error {reason}, see log for details'
 
 def redo():
@@ -1362,9 +1390,38 @@ while True:
                     if not tunnels:
                         print_message('There is yet no tunnels created through this program')
                         continue
+                    nodetails = True
+                    redraw(breakout=False)
+                    if len(tunnels) > 1:
+                        tun_options = ''
+                        for enum, value in enumerate(tunnels.values(), 1):
+                            tun_options += str(enum) + ') [' + value[0] + ']' + ' -> ' + value[2] + '\n'
+                        print_message(f'The list of tunnels the program keeps track of:\n{tun_options}')
+                        choice = accept_input(message = 'Enter a number of a tunnel to interact with - ', voffset=tun_options.count('\n') + 2)
+                        if not choice.isdigit():
+                            print_message('Entered value is not a number')
+                            continue
+                        choice = int(choice)
+                        if choice not in range(1, len(tunnels) + 1):
+                            print_message('No tunnel with such number')
+                            continue
+                        tun_choice = tunnels[list(tunnels.keys())[choice - 1]]
+                        print_message(f"Chosen tunnel - {'[' + tun_choice[0] + ']' + ' -> ' + tun_choice[2]}")
+                    else:
+                        tun_choice = list(tunnels.values())[0]
+                        print_message(f'The only installed tunnel is - {'[' + tun_choice[0] + ']' + ' -> ' + tun_choice[2]}')
+                    action = accept_input('Action to take (kill or restart) [k/r] - ', voffset=1)
                     
-                    print_message('The list of tunnels the program keeps track of:')
-                
+                    if action.lower() == 'k':
+                        tun_choice[2] = 'to be killed'
+                        tailing_print()
+                    elif action.lower() == 'r':
+                        tun_choice[2] = 'to be restarted'
+                        tailing_print()
+                    else:
+                        print_message('Entered action is neither r nor k')
+                    continue
+
                 try:
                     hp = conn_params()  # hp - host parameters
                 except Exception:
@@ -1372,8 +1429,25 @@ while True:
                     continue
 
                 __target = ''
-                defaultport = cfg["src_tunnel_port"]
-                sport = accept_input(message=f'Source port (empty for random, will attempt to increase if already in use) - ', preinput=defaultport)
+                nodetails = True
+                redraw(breakout=False)
+
+                srcport = cfg["src_tunnel_port"]
+                if srcport:
+                    srcport = int(srcport)
+                    for num in range(0, 65535 - srcport):
+                        try:
+                            s = socket.socket()
+                            s.bind(('', srcport + num))
+                            srcport = s.getsockname()[1]
+                            s.close()
+                            break
+                        except OSError:
+                            continue
+                        finally:
+                            s.close()
+                    print_message('pre-inserted value is taken from the config file and incremented until an opened port is met', voffset=1, cursesoptions=curses.A_DIM)
+                sport = accept_input(message=f'Source port (empty for random) - ', preinput=str(srcport), voffset=-1)
                 if sport:
                     if not sport.isdigit():
                         print_message('Entered value is not a number')
@@ -1383,19 +1457,12 @@ while True:
                         print_message('Entered port out of range of available ports')
                         continue
                 else: 
-                    for num in range(0, 65535 - int(sport)):
-                        try:
-                            s = socket.socket()
-                            s.bind(('', sport + num))
-                            sport = s.getsockname()[1]
-                            s.close()
-                            break
-                        except OSError as e:
-                            continue
+                    s = socket.socket()
+                    s.bind(('', 0))
+                    sport = sock.getsockname()[1]
 
-                defaultport = cfg["dst_tunnel_port"]
-                print_message(f'Source port - {sport}', voffset=1)
-                dport = accept_input(message=f'Destination port - ', preinput=defaultport)
+                print_message(f'Source port - {sport}')
+                dport = accept_input(message=f'Destination port - ', preinput=cfg["dst_tunnel_port"], voffset=1)
                 if not dport.isdigit():
                     print_message('Entered value is not a number')
                     continue
@@ -1405,17 +1472,18 @@ while True:
                     continue
                 
                 targethost = '127.0.0.1'
-                if 'ssh ' in hp['afterwards'] and re.search(r'ssh (\w+)', hp['afterwards']):
-                    optionaltarget = re.search(r'ssh (\w+)', hp['afterwards']).group(1)
+                if 'ssh ' in hp['afterwards'] and re.search(r'ssh ([\.\w]+)', hp['afterwards']):
+                    optionaltarget = re.search(r'ssh ([\.\w]+)', hp['afterwards']).group(1)
                     if accept_input(message=f'Found an additional host this entry is connecting to, should {optionaltarget} be used as a target one (y is default)? [y/n]: ') in ('', 'y'):
                         targethost = optionaltarget
-                        __target = f'{targethost}:{hp["address"]}'
+                        __target = f'{hp["address"]}:{targethost}'
 
                 ssh_options = f'-4 -N -L {sport}:{targethost}:{dport} {hp["user"]}@{hp["address"]} -p {hp["port"]}'
 
                 if hp['key'] is not None:
                     ssh_options += f' -i {hp["key"]}'
-                tunnels[0 if not tunnels else max(tunnels.keys()) + 1] = [f'{sport}:{__target if __target else hp["address"]}:{dport}', ('ssh', ssh_options.split(' '), hp['pass']), 'starting']
+                tunnels[0 if not tunnels else max(tunnels.keys()) + 1] = [f'{sport}:{__target if __target else hp["address"]}:{dport}', (ssh_options.split(' '), hp['pass']), 'starting']
+                wrt(f'\nStarting a tunnel with the following command:\nssh {ssh_options}')
                 proc_handler('ssh', ssh_options.split(' '), hp['pass'])
 
             case 11:        # Ctrl+K - Put an identity file in remote host's authorized_keys (should work only if password is defined for connection)

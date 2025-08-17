@@ -22,11 +22,12 @@ from secrets import token_urlsafe
 
 alt_pressed = focused = nodetails = False
 nested = highlstr = topprof = topconn = pos = conn_count = 0
-copied_details = message = sort = ''
+copied_details = sort = ''
 tunnels = {}
 changes = []
 redo_changes = []
 buffer_changes = []
+msgq = []
 picked_cons = set()
 pattern = re.compile(rf'^{sort}.*|.*\| *{sort}.*', re.I)
 gpg = GPG()
@@ -303,19 +304,17 @@ def macros(signal, frame):
 
 
 def monitor_process(proc):
-    global message, proc_count
     while proc.poll() is None:
         sleep(0.001)
         continue
     stdout = proc.stdout.read().decode().strip()
     if proc.returncode != 0:
-        message += f'Execution of "{extcmd}" as part of "{name}" template has returned a non-zero error code and the following came to the stderr:\n{res.stderr}\n'
+        msgq.append(f'Execution of "{extcmd}" as part of "{name}" template has returned a non-zero error code and the following came to the stderr:\n{res.stderr}')
     elif stdout == 0:
-        message += f'Execution of "{extcmd}" as part of "{name}" template was successful but nothing came to stdout\n'
+        msgq.append(f'Execution of "{extcmd}" as part of "{name}" template was successful but nothing came to stdout')
     cmd = ' '.join(proc.args)
     for name, commands in cfg['templ_list'].items():
         cfg['templ_list'][name] = commands.replace(f'#{{{cmd}}}', stdout)
-    proc_count -= 1
 
 # Function is called both for creating a menu in an active pane and as a handler for creating new pane and "populating" it with keys
 # This is required by the fact, that some keys' sending has to be precieved by returned characters, which implementation
@@ -432,6 +431,101 @@ def normalexit(signal, frame):
     deinitialize_scr()
 
 
+def parse_config():
+    try:
+        config_file = open(f'{userdir}/config')
+    except OSError:
+        msgq.append('Configuration file is missing or have insufficient priviligies to open, please refer to ~/.sshc/config.template')
+        return
+
+    lines = [l for l in config_file.readlines() if not l.startswith('#') and l != '\n']
+    tmpcfg = {}
+    for line in lines:
+        if '=' in line:
+            name, value = line.strip().split('=')
+            if ' ' in name or ' ' in value or len(value) == 0:
+                continue
+            if name in cfg.keys():
+                tmpcfg[name] = value
+            else:
+                msgq.append(f'Unknown parameter - {name}')
+
+    for key, value in tmpcfg.copy().items():
+        # numerical parameters
+        if key in ('never_ask_for_encryption', 'port', 'local_spacing', 'wf_timeout', 'select_multiplier', 'max_conn_displayed', 'src_tunnel_port', 'dst_tunnel_port') \
+            and not value.isdigit():
+                msgq.append(f'{key} was defined, but is not integer')
+                tmpcfg.pop(key)
+        
+        # the only float value
+        if key == 'wf_delay' and not value.isdigit():
+            try:
+                float(value)
+            except:
+                msgq.append(f'{key} was defined, but is neither the integer nor float')
+                tmpcfg.pop(key)
+
+        # local paths
+        if key in ('file_path', 'logfile', 'upload_from_dest', 'keys_path', 'import_path', 'from_scripts_path', 'to_scripts_path', 'upload_to_path', 'upload_from_dest'):
+            if value[0] not in ('~', '/'):
+                value = f'{userdir}/{value}'
+            if key in ('file_path', 'logfile'):
+                if not os.path.isfile(value):
+                    msgq.append(f'{key} parameter was treated as {value} and there is no such file')
+                    tmpcfg.pop(key)
+                    continue
+                if not os.access(value, os.R_OK):
+                    msgq.append(f'{key} parameter points to an existing file ({value}), but it can not be read from')
+                    tmpcfg.pop(key)
+                    continue
+                if not os.access(value, os.W_OK):
+                    msgq.append(f'{key} parameter points to an existing file ({value}), but it can not be written to')
+                    tmpcfg.pop(key)
+                    continue
+            else:
+                if not os.path.isdir(value):
+                    msgq.append('{key} parameter was treated as {value} and this directory does not exist')
+                    tmpcfg.pop(key)
+                    continue
+
+    for key in tmpcfg.keys():
+        cfg[key] = tmpcfg[key]
+
+    # Above was parsing and sanitization of generic parameters, below are two special ones
+    
+
+    if 'templ_list(\n' in lines:
+        if ')\n' not in lines[lines.index('templ_list(\n'):]:
+            msgq.append('templ_list has been attempted to be defined, but no closing bracket found')
+        else:
+            templs = lines[lines.index('templ_list(\n') + 1:lines.index(')\n')]
+            for templ in list(map(str.strip, templs)):
+                name, commands = templ.split('=')
+                cfg['templ_list'][name] = commands
+            for extcmd in set(re.findall(r'#\{(.*?)\}', ''.join(cfg['templ_list'].values()))):
+                proc = subprocess.Popen(extcmd.split(' '), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                threading.Thread(target=monitor_process, args=[proc], daemon=True).start() 
+
+    if 'new_profile:\n' in lines:
+        proflines = []
+        start = lines.index('new_profile:\n')
+        if not lines[start + 1].startswith('\t'):
+            proflines.append(lines[start + 1])
+            for line in lines[start + 2:]:
+                if not line.startswith('\t'):
+                    break
+                proflines.append(line)
+
+            lines = [l for l in lines if l not in proflines]
+            cfg['new_profile'] = proflines
+        else:
+            msgq.append('new_profile template has been attempted to be defined, but the profile name starts with a tab')
+
+    if len(cfg['new_profile']) < 2:
+        msgq.append('new_profile directive was processed, but ended up in an unsitable state, the value was reverted to defaults')
+        cfg['new_profile'] = ['New profile\n', '\tnew\t10.100.0.0\n']
+
+
 def print_message(text, offset=tabsize, voffset=0, cursesoptions=0):
     conn = profiles[resolve('conn')]
     print_point = len(conn.expandtabs().rstrip()) + offset
@@ -464,6 +558,7 @@ def print_message(text, offset=tabsize, voffset=0, cursesoptions=0):
         return
 
     scr.addstr(scr.getyx()[0] + voffset, print_point, text, cursesoptions)
+    scr.refresh()
 
 
 # The only function responsible for printing everything displayed on the screen, called only in redraw()
@@ -721,9 +816,14 @@ def __continuous_print():
         msgwin.addstr(''.join(message))
         msgwin.refresh()
 
+def main_thread_handler(exc_type, exc_value, exc_traceback):
+    deinitialize_scr(noexit=True)
+    print('Uncaught exception was raised, terminal should be returned to its original state')
+    print(exc_type, exc_value, exc_traceback)
+    return
+
 
 def thread_handler(args):
-    global message
     func = args.thread.name
 
     reason = 'which tracing is not yet implemented'
@@ -737,7 +837,7 @@ def thread_handler(args):
         'during the procedure of continious log streaming'
 
     wrt(func, args.exc_value)
-    message = f'There was an unhandled error {reason}, see log for details'
+    msgq.append(f'There was an unhandled error {reason}, see log for details')
 
 def redo():
     if not redo_changes:
@@ -831,19 +931,16 @@ signal.signal(signal.SIGUSR2, macros)
 signal.signal(signal.SIGCHLD, signal.SIG_IGN)
 signal.signal(signal.SIGTSTP, undo)
 threading.excepthook = thread_handler
+sys.excepthook = main_thread_handler
 
 userdir = os.path.expanduser('~') + '/.sshc'
 if not os.path.isdir(userdir):
     os.mkdir(userdir)
-try:
-    config_file = open(f'{userdir}/config')
-except OSError:
-    exit('Configuration file is missing or have insufficient priviligies to open, please refer to ~/.sshc/config.template')
 
 cfg = {
-    'file_path': 'profiles',
-    'never_ask_for_encryption': False,
-    'logfile': '/var/log/sshc',
+    'file_path': f'{userdir}/profiles',
+    'never_ask_for_encryption': 0,
+    'logfile': f'{userdir}/log',
     'templ_list': {},
     'default_templ': '',
     'keys_path': '',
@@ -856,8 +953,8 @@ cfg = {
     'wf_delay': 0,
     'select_multiplier': 4,
     'import_path': '',
-    'from_scripts': [],
-    'to_scripts': [],
+    'from_scripts_path': f'{userdir}/from_scripts/',
+    'to_scripts_path': f'{userdir}/to_scripts/',
     'upload_from_path': '',
     'upload_to_path': '',
     'upload_from_dest': os.path.expanduser('~'),
@@ -867,46 +964,9 @@ cfg = {
     'max_conn_displayed': 30
 }
 
-lines = [l for l in config_file.readlines() if not l.startswith('#') and l != '\n']
-if 'templ_list(\n' in lines:
-    if ')\n' not in lines[lines.index('templ_list(\n'):]:
-        exit('templ_list attempted to be defined, but no closing bracket found')
-    templs = lines[lines.index('templ_list(\n') + 1:lines.index(')\n')]
-    lines = [l for l in lines if l not in lines[lines.index('templ_list(\n'):lines.index(')\n') + 1]]
-
-cmdlist = []
-proc_count = 0
-for templ in list(map(str.strip, templs)):
-    name, commands = templ.split('=')
-    cfg['templ_list'][name] = commands
-    for extcmd in re.findall(r'#\{(.*?)\}', commands):
-        if extcmd not in cmdlist:
-            cmdlist.append(extcmd)
-            proc = subprocess.Popen(extcmd.split(' '), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            threading.Thread(target=monitor_process, args=[proc], daemon=True).start() 
-            proc_count += 1
-del cmdlist
- 
-if 'new_profile:\n' in lines:
-    proflines = [l for l in lines[lines.index('new_profile:\n'):] if '=' not in l]
-    lines = [l for l in lines if l not in proflines]
-    cfg['new_profile'] = proflines[1:]
-
-if len(cfg['new_profile']) < 2:     # if something unsuitable was found in a file - back to defaults
-    cfg['new_profile'] = ['New profile\n', '\tnew\t10.100.0.0\n']
-
-for param in lines:
-    cfg.update([param.strip().split('=')])
+parse_config()
 
 mainfile = cfg['file_path']
-if '/' not in cfg['file_path']:
-    mainfile = userdir + '/' + cfg['file_path']
-
-if os.path.isdir(f'{userdir}/from_scripts'):
-    cfg['from_scripts'] = sorted(os.listdir(f'{userdir}/from_scripts'))
-if os.path.isdir(f'{userdir}/to_scripts'):
-    cfg['to_scripts'] = sorted(os.listdir(f'{userdir}/to_scripts'))
-
 
 if os.path.isfile(mainfile):
     filetype = os.popen(f'file --mime-type -b {mainfile}').read()
@@ -938,7 +998,7 @@ if os.path.isfile(mainfile):
 
 else:
     profiles = cfg['new_profile']
-    message = 'Profiles file was not found (which is normal during the first launch), the new one will be saved after exiting the program'
+    msgq.append('Profiles file was not found (which is normal during the first launch), the new one will be saved after exiting the program')
 
 scr = curses.initscr()
 scr.keypad(True)
@@ -958,17 +1018,24 @@ curses.meta(True)
 threading.Thread(target=resize_thread, daemon=True).start()
 redraw(0, breakout=False)
 
-if proc_count > 0:
+if threading.active_count() > 2:
     print_message('The application is ready to work, but not all of the template substitution has finished executing')
-    while proc_count > 0:
+    while threading.active_count() != 2:
         continue
-print_message('Template substitution finished, good to work')
+    redraw(breakout=False)
+    print_message('Template substitution finished, good to work')
+
+if msgq:    # offset for startup information if there is any
+    msgq = ['\n\n'] + msgq
 
 while True: 
     nodetails = False
-    if message:
-        print_message(message)
-        message = None
+    if msgq:
+        if len(msgq) > 1:
+            nodetails = True
+            redraw(breakout=False)
+        print_message(msgq, offset=tabsize * (3 if not nested else 1))
+        msgq = []
     keypress = scr.getch() 
     if 'print' in str(threading.enumerate()):
         stop_print.set()
@@ -1235,8 +1302,9 @@ while True:
                         if topconn and conn in range(conn_count - max_displayed, conn_count + 1):
                             topconn -= 1
                         if conn_count == 1:
-                            message = 'Removing the only one left host is not safe. Consider editing it or removing profile'
-                            break
+                            msgq.append('Removing the only one left host is not safe. Consider editing it or removing profile')
+                            picked_cons = set()
+                            redraw()
                         profiles.pop(conn)
 
                     redrawpoint = min(picked_cons)
@@ -1391,6 +1459,7 @@ while True:
                         print_message('There is yet no tunnels created through this program')
                         continue
                     nodetails = True
+                    focused = True
                     redraw(breakout=False)
                     if len(tunnels) > 1:
                         tun_options = ''
@@ -1409,8 +1478,9 @@ while True:
                         print_message(f"Chosen tunnel - {'[' + tun_choice[0] + ']' + ' -> ' + tun_choice[2]}")
                     else:
                         tun_choice = list(tunnels.values())[0]
-                        print_message(f'The only installed tunnel is - {'[' + tun_choice[0] + ']' + ' -> ' + tun_choice[2]}')
-                    action = accept_input('Action to take (kill or restart) [k/r] - ', voffset=1)
+                        print_message(f'The only installed tunnel is - {'[' + tun_choice[0] + ']' + ' -> ' + tun_choice[2]}')    
+                    print_message('Action to take (kill or restart) [k/r] - ', voffset=1)
+                    action = scr.getkey()
                     
                     if action.lower() == 'k':
                         tun_choice[2] = 'to be killed'
@@ -1419,6 +1489,7 @@ while True:
                         tun_choice[2] = 'to be restarted'
                         tailing_print()
                     else:
+                        redraw(breakout=False)
                         print_message('Entered action is neither r nor k')
                     continue
 
@@ -1501,11 +1572,17 @@ while True:
                     continue
 
                 nodetails = True
+                focused = True
+                redraw(breakout=False)
                 action = 'to'
                 if keypress == 6:
                     action = 'from'
 
-                options = ['1 - Automatic upload (based on the connection details)'] + [str(num) + ' - ' + script for num, script in enumerate(cfg[f'{action}_scripts'], 2)]
+                try:
+                    custom_opts = sorted(os.listdir(cfg[f'{action}_scripts_path']))
+                except Exception:
+                    custom_opts = []
+                options = ['1 - Automatic upload (based on the connection details)'] + [str(num) + ' - ' + script for num, script in enumerate(custom_opts, 2)]
                 option = 1
                 if len(options) > 1:
                     print_message(['Enter a number from the list of available options:'] + options)

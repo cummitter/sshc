@@ -15,12 +15,12 @@ import sys
 from copy import deepcopy
 from getpass import getpass
 from gnupg import GPG
-from textpad import Textbox
+from curses.textpad import Textbox
 from time import sleep, time
 from secrets import token_urlsafe
 
 
-alt_pressed = focused = nodetails = False
+alt_pressed = focused = nodetails = tab_completion = False
 nested = highlstr = topprof = topconn = pos = conn_count = 0
 copied_details = sort = ''
 tunnels = {}
@@ -50,16 +50,16 @@ def accept_input(message='', preinput='', start=None, voffset=0):
         if nodetails:
             start = len('\t'.join(conn.split('\t')[:3]).expandtabs().rstrip()) + tabsize + len(message) 
     print_message(message, voffset=voffset)
-    editwin = curses.newwin(1, width - 2 - start, scr.getyx()[0], start)
+    editwin = curses.newwin(1, width - 2 - start, scr.getyx()[0] + voffset, start)
     editwin.addstr(preinput)
     curses.curs_set(2)
     scr.refresh()
-    box = Textbox(editwin, insert_mode=True)
-    box.edit() 
+    box = Textbox_enhanced(editwin, insert_mode=True)
+    res = box.edit() 
     curses.curs_set(0)
     redraw(breakout=False)
     focused = False
-    return box.gather()[:-1]
+    return res
 
 
 def autocomplete(path):
@@ -68,16 +68,16 @@ def autocomplete(path):
             return s + '/'
         return s
     
-    if len(path) == 0:
+    if not path:
         path = '/'
     file = path[path.rfind('/') + 1:]
     path = path[:path.rfind('/') + 1]
     if not os.access(path, os.R_OK):
         return path, ['can not access the directory']
 
-    suggestions = [f for f in os.listdir(path) if re.match(rf'{file}.*', f) and not f.startswith('.')]
+    suggestions = [f for f in os.listdir(path) if re.match(rf'{re.escape(file)}.*', f) and not f.startswith('.')]
     if file.startswith('.'):
-        suggestions = [f for f in os.listdir(path) if re.match(rf'{file}.*', f) and f.startswith('.')]
+        suggestions = [f for f in os.listdir(path) if re.match(rf'{re.escape(file)}.*', f) and f.startswith('.')]
     if len(suggestions) > 1:
         for pos, char in enumerate(sorted(suggestions, key=len)[0], 0):
             if len(suggestions) == len([sug for sug in suggestions if sug[pos] == char]):
@@ -96,12 +96,19 @@ def autocomplete(path):
     return path, list(map(addslash, suggestions))
 
 def autocomplete_loop(msg, path):
+    global tab_completion
+    tab_completion = True
+    filename = path
     while True:
-        filename = accept_input(message=msg, preinput=path)
-        if filename is None or os.path.isfile(filename):
-            return filename
         path, suggestions = autocomplete(filename)
         print_message(suggestions, offset=tabsize + len(msg) + len(path[:path.rfind('/') + 1]), voffset=1)
+        filename, return_by = accept_input(message=msg, preinput=path)
+        if os.path.isfile(filename):
+            if return_by == 'enter':
+                return filename
+            if return_by == 'tab':
+                print_message('Nothing to complete', offset=tabsize + len(msg), voffset=1, cursesoptions=curses.A_DIM)
+                continue
 
 
 def conn_params(conn_num=None, prof_index=None, commands=False):
@@ -117,17 +124,16 @@ def conn_params(conn_num=None, prof_index=None, commands=False):
             'prof_name': prof_str[0],
             'syntax': None,
             'address': conn_str[1],
-            'port': 22,
+            'port': cfg['port'],
             'user': cfg['user'],
             'key': None,
             'pass': None,
-            'afterwards': 'sudo -i'
+            'afterwards': cfg['afterwards']
             }
 
     prof_details = conn_details = ''
     if len(prof_str) > 1:
         prof_details = prof_str[1]
-        params['syntax'] = None
     if len(conn_str) > 2:
         conn_details = conn_str[2]
 
@@ -336,17 +342,18 @@ def neighbors(signal, frame):
         exclcount = 0
         tmcmd = ['menu', '-x', 'R', '-y', '0']
         for i, conn in enumerate(profiles[index + 1:], 48):
+            i -= exclcount
             if not conn.startswith('\t'):
                 break
             conn = conn.strip().split('\t')
-            if i - exclcount >= 58:
+            if i >= 58:
                 i += 39     # Shift to the a-z part of ASCII
             if conn[0].startswith('#'):
                 conn[0] = '#{}-' + conn[0]
                 exclcount += 1
                 if len(tmcmd) != 5:
                     tmcmd.append('')
-            tmcmd += [f'{conn[0]} {conn[1]}', chr(i - exclcount), f'set-environment neighbor {chr(i)}; run-shell "pkill sshc -POLL"']
+            tmcmd += [f'{conn[0]} {conn[1]}', chr(i), f'set-environment neighbor {chr(i)}; run-shell "pkill sshc -POLL"']
         pane.cmd(*tmcmd)
         return 0
 
@@ -357,6 +364,7 @@ def neighbors(signal, frame):
                 conn_num = int(conn_num) + 1
             else:
                 conn_num = ord(conn_num) - 87 + 1   # 87 shifts ASCII code for letters to the integers higher than 9
+            conn_num += len([conn for conn in profiles[index:index+conn_num] if conn.startswith('\t#')])
             pane = pane.split()
             pane.select()
             create_connection(pane, conn_num, index)
@@ -443,7 +451,7 @@ def parse_config():
     for line in lines:
         if '=' in line:
             name, value = line.strip().split('=')
-            if ' ' in name or ' ' in value or len(value) == 0:
+            if ' ' in name or (' ' in value and name != 'afterwards') or len(value) == 0:
                 continue
             if name in cfg.keys():
                 tmpcfg[name] = value
@@ -557,7 +565,9 @@ def print_message(text, offset=tabsize, voffset=0, cursesoptions=0):
         msgwin.refresh()
         return
 
+    cursor_pos = scr.getyx()[0]
     scr.addstr(scr.getyx()[0] + voffset, print_point, text, cursesoptions)
+    scr.move(cursor_pos, 0)  # addstr() also moves the cursor for some reason
     scr.refresh()
 
 
@@ -922,6 +932,163 @@ def wrt(*values):
             log.write(str(value) + '\n')
     log.flush()
 
+
+class Textbox_enhanced(Textbox):
+
+    def do_command(self, ch):
+        "Process a single editing command."
+        self._update_max_yx()
+        (y, x) = self.win.getyx()
+        self.lastcmd = ch
+        if curses.ascii.isprint(ch):
+            if y < self.maxy or x < self.maxx:
+                self._insert_printable_char(ch)
+
+        elif ch == curses.ascii.TAB or ch == '\t':
+            if tab_completion:
+                return -2
+            ts = curses.get_tabsize()
+            curs_offset = [i for i in range(x, x + ts) if i % ts == 0][0]
+            if x % ts == 0:
+                curs_offset = x + ts
+
+            line = self.win.instr(0, 0)
+            tabbed_line = line[:x] + b' ' * (curs_offset - x) + line[x:].strip()
+            self.win.addstr(y, 0, tabbed_line)
+            self.win.move(y, curs_offset)
+        
+        elif ch == 23:                                         # ^w
+            regular_char_seen = False
+            for i in range(1, 100):
+                if x - i < 0:
+                    break
+                if self.win.instr(y, x - i, 1) == b' ' and regular_char_seen:
+                    self.win.move(y, x - i + 1)
+                    break
+                if self.win.instr(y, x - i, 1) != b' ':
+                    regular_char_seen = True
+                self.win.delch(y, x - i)
+
+
+        elif ch == 554:                                       # ^←
+            line = self.win.instr(0, 0)
+            if chr(line[x - 1]) == ' ':
+                until_regular = True
+            else:
+                until_regular = False
+            offset = 0
+            for i in range(2, 100):
+                offset = i - 1
+                if (chr(line[x - i]) != ' ' and until_regular) or (chr(line[x - i]) == ' ' and not until_regular):
+                    break
+            if x - offset < 0:
+                offset = x
+            self.win.move(y, x - offset)
+
+        elif ch == 569:                                       # ^→
+            line = self.win.instr(0, 0)
+            if chr(line[x + 1]) == ' ':
+                until_regular = True
+            else:
+                until_regular = False
+            offset = 0
+            for i in range(2, 100):
+                offset = i
+                if x + i > len(line.rstrip()):
+                    break
+                if (chr(line[x + i]) != ' ' and until_regular) or (chr(line[x + i]) == ' ' and not until_regular):
+                    break
+            self.win.move(y, x + offset)
+
+        elif ch == curses.ascii.SOH:                           # ^a
+            self.win.move(y, 0)
+
+        elif ch in (curses.ascii.STX,curses.KEY_LEFT,
+                    curses.ascii.BS,
+                    curses.KEY_BACKSPACE,
+                    curses.ascii.DEL):
+            if x > 0:
+                self.win.move(y, x-1)
+            elif y == 0:
+                pass
+            elif self.stripspaces:
+                self.win.move(y-1, self._end_of_line(y-1))
+            
+            else:
+                self.win.move(y-1, self.maxx)
+            if ch in (curses.ascii.BS, curses.KEY_BACKSPACE, curses.ascii.DEL):
+                if self.win.instr(y, x - 1, 1) == b' ':
+                    for i in range(1, curses.get_tabsize() + 1):
+                        if self.win.instr(y, x - i, 1) != b' ':
+                            self.win.move(y, x - i + 1)
+                            break
+                        self.win.delch(y, x - i)
+                else:
+                    self.win.delch()
+        
+        elif ch == curses.ascii.EOT:                           # ^d
+            return 0
+        elif ch == curses.ascii.ENQ:                           # ^e
+            if self.stripspaces:
+                self.win.move(y, self._end_of_line(y))
+            else:
+                self.win.move(y, self.maxx)
+        elif ch in (curses.ascii.ACK, curses.KEY_RIGHT):       # ^f
+            if x < self.maxx:
+                self.win.move(y, x+1)
+            elif y == self.maxy:
+                pass
+            else:
+                self.win.move(y+1, 0)
+        elif ch == curses.ascii.NL:                            # ^j
+            if self.maxy == 0:
+                return 0
+            elif y < self.maxy:
+                self.win.move(y+1, 0)
+        elif ch == curses.ascii.VT:                            # ^k
+            if x == 0 and self._end_of_line(y) == 0:
+                self.win.deleteln()
+            else:
+                # first undo the effect of self._end_of_line
+                self.win.move(y, x)
+                self.win.clrtoeol()
+        elif ch == curses.ascii.FF:                            # ^l
+            self.win.refresh()
+        elif ch in (curses.ascii.SO, curses.KEY_DOWN):         # ^n
+            if y < self.maxy:
+                self.win.move(y+1, x)
+                if x > self._end_of_line(y+1):
+                    self.win.move(y+1, self._end_of_line(y+1))
+        elif ch == curses.ascii.SI:                            # ^o
+            self.win.insertln()
+        elif ch in (curses.ascii.DLE, curses.KEY_UP):          # ^p
+            if y > 0:
+                self.win.move(y-1, x)
+                if x > self._end_of_line(y-1):
+                    self.win.move(y-1, self._end_of_line(y-1))
+        return 1
+    
+    def edit(self, validate=None):
+        "Edit in the widget window and collect the results."
+        while 1:
+            ch = self.win.getch()
+            if validate:
+                ch = validate(ch)
+            if not ch:
+                continue
+            do_results = self.do_command(ch)
+            if do_results == 0:
+                break
+            if do_results == -1:     # In case contents of the window do not need to be returned
+                return
+            if do_results == -2:
+                return self.gather().rstrip(), 'tab'
+            self.win.refresh()
+        if tab_completion:
+            return self.gather().rstrip(), 'enter'
+        return self.gather().rstrip()
+
+
 signal.signal(signal.SIGINT, normalexit)
 signal.signal(signal.SIGHUP, normalexit)
 signal.signal(signal.SIGTERM, normalexit)
@@ -948,6 +1115,7 @@ cfg = {
     'user': 'undefined_user',
     'port': 22,
     'password': 'undefined_password',
+    'afterwards': '',    # not described
     'local_spacing': 0,
     'wf_timeout': 10,
     'wf_delay': 0,
@@ -1030,6 +1198,7 @@ if msgq:    # offset for startup information if there is any
 
 while True: 
     nodetails = False
+    tab_completion = False
     if msgq:
         if len(msgq) > 1:
             nodetails = True
@@ -1102,6 +1271,7 @@ while True:
                     nested = 0
                     picked_cons = set()
                     topconn = 0
+                    pos = 0
                     redraw(highlstr)
                 
                 if highlstr == 0 and topprof != 0: topprof = 0
@@ -1116,7 +1286,7 @@ while True:
 
             case 35 | 36 | 37 | 94 | 38 | 42 | 40:  # Shift + number (which is in fact an other key sent instead of "shift-appended" number)
                 if not nested:
-                    continue
+                    nested = True
 
                 jump = 0
                 if keypress in (35, 36, 37):
@@ -1153,7 +1323,7 @@ while True:
                             topconn = jump - max_displayed + 4
                         redraw()
 
-                    redraw(jump if jump != 0 else pos + num)
+                redraw(jump if jump != 0 else pos + num)
 
             case 336 | 337:   # Shift + arrow down/up for mass host selection
                 if nested:
@@ -1254,6 +1424,9 @@ while True:
                         lasttab = ind
 
                 newline = re.sub(' {2,}+', '\t', accept_input(preinput=editline, start=0))
+                if newline == '':
+                    msgq.append('Leaving a record empty is not a good idea')
+                    redraw()
                 if not nested and newline != profiles[replace_line].strip():
                     newline = unique_name(newline)
 
@@ -1359,6 +1532,7 @@ while True:
                     copied_details = line.split('\t')[3]
                 elif not nested and line.count('\t') > 0:
                     copied_details = line.split('\t')[1]
+                    wrt(copied_details)
                 else:
                     copied_details = ''
                 redraw()
@@ -1425,7 +1599,7 @@ while True:
 
 
             case 21:        # Ctrl+U - Upload(?) a profile from file (only IPs) 
-                filename = autocomplete_loop('File to take IPs from - ', cfg['import_path'] + '/')
+                filename = autocomplete_loop('File to take IPs from - ', cfg['import_path'])
                 try:
                     file = open(filename)
                     ips = sorted(set(re.findall(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}', file.read())))
@@ -1518,7 +1692,7 @@ while True:
                         finally:
                             s.close()
                     print_message('pre-inserted value is taken from the config file and incremented until an opened port is met', voffset=1, cursesoptions=curses.A_DIM)
-                sport = accept_input(message=f'Source port (empty for random) - ', preinput=str(srcport), voffset=-1)
+                sport = accept_input(message=f'Source port (empty for random) - ', preinput=str(srcport))
                 if sport:
                     if not sport.isdigit():
                         print_message('Entered value is not a number')
@@ -1594,9 +1768,9 @@ while True:
                     option = int(chr(keypress))
 
                 if action == 'to':
-                    filename = autocomplete_loop('Enter a filename to be uploaded to host - ', cfg['upload_to_path'] + '/')
+                    filename = autocomplete_loop('Enter a filename to be uploaded to host - ', cfg['upload_to_path'])
                 else:
-                    filename = accept_input(message='Enter a filename to be uploaded from host - ', preinput=cfg[f'upload_from_path'] + '/')
+                    filename = accept_input(message='Enter a filename to be uploaded from host - ', preinput=cfg[f'upload_from_path'])
 
                 if option == 1:
                     src, dst = filename, f'{hp["user"]}@{hp["address"]}:'
@@ -1611,8 +1785,7 @@ while True:
                     proc_handler('scp', [scp_options, src, dst], hp['pass'])
 
                 else:
-                    chosen_script = cfg[f'{action}_scripts'][option - 2]
-                    subprocess.Popen([f'{userdir}/{action}_scripts/{chosen_script}', hp['address'],
+                    subprocess.Popen([cfg[f'{action}_scripts_path'] + custom_opts[option - 2], hp['address'],
                                   str(hp['port']), str(hp['key']), f'"{hp["pass"]}"', str(hp["user"]), str(filename)], stdout=log, stderr=log)
                 tailing_print()
 

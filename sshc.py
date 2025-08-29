@@ -36,26 +36,26 @@ stop_print = threading.Event()
 lock = threading.Lock()
 tabsize = curses.get_tabsize()
 
-# os.forkpty() complains about multi-threaded enviroment, but as far as i've read, deadlocks might appear only 
+# os.forkpty() complains about multi-threaded enviroment, but as far as i've read, deadlocks might appear only
 # if the forked process runs the same code as its parent, which is not the case here.
-warnings.filterwarnings("ignore", category=DeprecationWarning) 
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 
 def accept_input(message='', preinput='', start=None, voffset=0):
-    global nodetails, focused
+    global focused
     focused = True
     if start is None:
         conn = profiles[resolve('conn')]
         start = len(conn.expandtabs().rstrip()) + tabsize + len(message)
         if nodetails:
-            start = len('\t'.join(conn.split('\t')[:3]).expandtabs().rstrip()) + tabsize + len(message) 
+            start = len('\t'.join(conn.split('\t')[:3]).expandtabs().rstrip()) + tabsize + len(message)
     print_message(message, voffset=voffset)
     editwin = curses.newwin(1, width - 2 - start, scr.getyx()[0] + voffset, start)
     editwin.addstr(preinput)
     curses.curs_set(2)
     scr.refresh()
     box = Textbox_enhanced(editwin, insert_mode=True)
-    res = box.edit() 
+    res = box.edit()
     curses.curs_set(0)
     redraw(breakout=False)
     focused = False
@@ -67,7 +67,7 @@ def autocomplete(path):
         if os.path.isdir(path[:path.rfind('/') + 1] + s) and not s.endswith('/'):
             return s + '/'
         return s
-    
+
     if not path:
         path = '/'
     file = path[path.rfind('/') + 1:]
@@ -135,16 +135,19 @@ def conn_params(conn_num=None, prof_index=None, commands=False):
     if len(prof_str) > 1:
         prof_details = prof_str[1]
     if len(conn_str) > 2:
-        conn_details = conn_str[2]
+       conn_details = conn_str[2]
 
     for pstr in [prof_details, conn_details]:
         if pstr == '!':
-            params['afterwards'] = pstr = ''
+            params['afterwards'] = ''
+            continue
+        if '| ' in pstr:
+            pstr, params['afterwards'] = map(str.strip, pstr.split('| '))
         if pstr.startswith('!'):
             params['syntax'] = None
             pstr = pstr[1:]
 
-        for templ in cfg['templ_list'].keys():
+        for templ in cfg['templ_list']:
             if pstr.startswith(templ + ' ') or pstr == templ:
                 params['syntax'] = templ
         for param in ['port', 'pass', 'user']:
@@ -152,19 +155,19 @@ def conn_params(conn_num=None, prof_index=None, commands=False):
                 params[param] = re.search(rf'{param} ([^ ]+)', pstr).group(1)
                 pstr = re.sub(rf'{param} [^ ]+ ?', '', pstr)
 
-        if 'key ' in pstr:
-            if '/' in pstr:
-                params['user'], params['key'] = re.search(r'key ([^ ]+)?/([^ ]+)', pstr).groups()
-                if params['user'] is None:
-                    params['user'] = cfg['user']
-            else:
-                params['user'] = re.search(r'key (\w+)', pstr).group(1)
-                params['key'] = cfg['key']
-            params['key'] = cfg['keys_path'] + params['key']
-        if 'key ' not in pstr and '/' in pstr:
+        if re.match(r'^[^ ]+/[^ ]', pstr):
             params['user'], params['pass'] = re.search(r'^([^ ]+)/([^ ]+)', pstr).groups()
-        if '|' in pstr:
-            params['afterwards'] = pstr[pstr.find('|') + 1:].strip()
+        
+        if re.match('key [^ ]+/[^ ]', pstr):
+            params['user'], params['key'] = re.search(r'key ([^ ]+)?/([^ ]+)', pstr).groups()
+        
+        elif re.match('^key [^ /]+', pstr):
+            params['user'] = re.search(r'key (\w+)', pstr).group(1)
+            params['key'] = cfg['key']
+
+    if params['key']:
+        params['key']= cfg['keys_path'] + params['key']
+            
 
     if not commands:
         return params
@@ -172,8 +175,8 @@ def conn_params(conn_num=None, prof_index=None, commands=False):
     command = 'ssh {user}@{address} -p {port}' if params['syntax'] is None else cfg['templ_list'][params['syntax']]
     if params['key'] is not None:
         command += f' -i {params["key"]}'
-    for param in params.keys():
-        command = command.replace('{'+param+'}', str(params[param]))
+    for param, value in params.items():
+        command = command.replace('{'+param+'}', str(value))
     command = command.split(', ')
 
     if params['pass'] is not None:
@@ -189,13 +192,13 @@ def create_connection(pane, conn_num, prof_index=None):
     first_line = 0
     ssh_met = False
     for command in conn_params(conn_num, prof_index, commands=True):
-        
+
         if command.startswith('wf'):
             try:
                 timeout, waitfor, send = re.search(r"wf (\d+)? ?'(.*)' then '(.*)'", command).groups()
             except Exception:
                 raise AssertionError("Could not parse 'wait for' expression, further execution terminated")
-            
+
             if timeout is None:
                 timeout = cfg['wf_timeout']
             start = time()
@@ -237,18 +240,11 @@ def deinitialize_scr(noexit=False):
         return
     exit(0)
 
-def hide_password(params):
-    if 'key ' in params:
-        return params
-    elif 'pass ' in params:
-        params = params.replace(re.search(r'pass ([^ ]*)', params).group(1), '******')
-    elif re.search(r'[^ ]*?/.*', params):
-        params = params.replace(re.search(r'[^ ]*?/([^ ]*)', params).group(1), '******')
-
-    if params[-1] != '\n':
-        params += '\n'
+def hide_sensitive(params):
+    params = re.sub(r"(wf (\d+)? ?'.*' then )'.*'", r"\g<1>'******'", params)
+    params = re.sub(r"(pass )[^ ]*", r"\g<1>******", params)
+    params = re.sub(r'^!?([^ ]+/)[^ ]+', r"\g<1>******", params)
     return params
-
 
 def macros(signal, frame):
     try:
@@ -256,7 +252,7 @@ def macros(signal, frame):
     except FileNotFoundError:
         os.system("tmux display-message -d 3000 'Could not find or open \"macros\" file' 2>/dev/null")
         return
-    
+
     # I was unable to find a different solution for including curly braces in a command's syntax,
     # so it is straight up garbage relying on a what-so constant execution of command-prompt
     # If you wish to debug this code, run resulting 'command' into the tmux, not via "tmux 'command-prompt'" command
@@ -287,7 +283,7 @@ def macros(signal, frame):
         if ':' in firstwords:
             if keys[nestlevel] == 58:
                 keys[nestlevel] = 97
-            
+
             termsignals = ''
             name = line[:line.find(':')]
             command = line[line.find(':')+1:].strip()
@@ -304,7 +300,7 @@ def macros(signal, frame):
 
             cmd += f'"{name}" {chr(keys[nestlevel])} "send-keys \\\'{command}\\\'{termsignals}" '
             keys[nestlevel] += 1
-    
+
     threading.Thread(target=starter, args=[cmd]).start(); sleep(0.005); srv.cmd('send-keys', '-K', 'Enter')    # It is sort of a pipeline, no judgies pls
     macros_file.close()
 
@@ -335,7 +331,7 @@ def neighbors(signal, frame):
         os.system(f"tmux display-message -d 3000 'There is no profile with the \"{win.window_name}\" name' 2>/dev/null")
         return
     except Exception:
-        os.system(f"tmux display-message -d 3000 'Could not find \"[maanged_session]\"' 2>/dev/null")
+        os.system("tmux display-message -d 3000 'Could not find \"[maanged_session]\"' 2>/dev/null")
         return
 
     if signal == 10:     # SIGUSR1
@@ -364,14 +360,14 @@ def neighbors(signal, frame):
                 conn_num = int(conn_num) + 1
             else:
                 conn_num = ord(conn_num) - 87 + 1   # 87 shifts ASCII code for letters to the integers higher than 9
-            conn_num += len([conn for conn in profiles[index:index+conn_num] if conn.startswith('\t#')])
+            conn_num += len([conn for conn in profiles[index:index+conn_num+1] if conn.startswith('\t#')])
             pane = pane.split()
             pane.select()
             create_connection(pane, conn_num, index)
             sesh.remove_environment('neighbor')
         except Exception:
             pane.kill()
-            os.system(f"tmux display-message -d 3000 'Could not parse chosen host configuration' 2>/dev/null")
+            os.system("tmux display-message -d 3000 'Could not parse chosen host configuration' 2>/dev/null")
 
 
 # Currently bugged asf, for some reason libtmux library thinks, that session already exist
@@ -402,17 +398,17 @@ def normalexit(signal, frame):
                 break
             result.append(conn)
     profiles = result
- 
+
     if not os.path.isfile(mainfile):    # By default encrypt newly created files
         open(mainfile, 'a').close()
         key = token_urlsafe(64)
         keyring.set_password(mainfile + '_' + str(os.stat(mainfile).st_ino), os.getlogin(), key)
-    
+
     elif 'plain' in filetype:
         if not cfg['never_ask_for_encryption']:
             deinitialize_scr(noexit=True)
             option = input("Would you like to encrypt the file? (y - generate passphrase and save it to local keyring, n - don't encrypt, m - manually specified passphrase): ").lower()
-            
+
             if option == 'y':
                 key = token_urlsafe(64)
                 keyring.set_password(mainfile + '_' + str(os.stat(mainfile).st_ino), os.getlogin(), key)
@@ -453,7 +449,7 @@ def parse_config():
             name, value = line.strip().split('=')
             if ' ' in name or (' ' in value and name != 'afterwards') or len(value) == 0:
                 continue
-            if name in cfg.keys():
+            if name in cfg:
                 tmpcfg[name] = value
             else:
                 msgq.append(f'Unknown parameter - {name}')
@@ -464,7 +460,7 @@ def parse_config():
             and not value.isdigit():
                 msgq.append(f'{key} was defined, but is not integer')
                 tmpcfg.pop(key)
-        
+
         # the only float value
         if key == 'wf_delay' and not value.isdigit():
             try:
@@ -496,23 +492,24 @@ def parse_config():
                     tmpcfg.pop(key)
                     continue
 
-    for key in tmpcfg.keys():
+    for key in tmpcfg:
         cfg[key] = tmpcfg[key]
 
+
     # Above was parsing and sanitization of generic parameters, below are two special ones
-    
+
 
     if 'templ_list(\n' in lines:
         if ')\n' not in lines[lines.index('templ_list(\n'):]:
             msgq.append('templ_list has been attempted to be defined, but no closing bracket found')
         else:
             templs = lines[lines.index('templ_list(\n') + 1:lines.index(')\n')]
-            for templ in list(map(str.strip, templs)):
+            for templ in map(str.strip, templs):
                 name, commands = templ.split('=')
                 cfg['templ_list'][name] = commands
             for extcmd in set(re.findall(r'#\{(.*?)\}', ''.join(cfg['templ_list'].values()))):
                 proc = subprocess.Popen(extcmd.split(' '), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                threading.Thread(target=monitor_process, args=[proc], daemon=True).start() 
+                threading.Thread(target=monitor_process, args=[proc], daemon=True).start()
 
     if 'new_profile:\n' in lines:
         proflines = []
@@ -542,7 +539,7 @@ def print_message(text, offset=tabsize, voffset=0, cursesoptions=0):
     if isinstance(text, list):
         text = ' \n'.join(text)
 
-    if len(text) + print_point > width - 10 or '\n' in text:    # If message does not visually fits in single line, put it into a rectangled window  
+    if len(text) + print_point > width - 10 or '\n' in text:    # If message does not visually fits in single line, put it into a rectangled window
         lines = ['']
         linenum = 0
         for word in text.split(' '):
@@ -576,7 +573,7 @@ def print_message(text, offset=tabsize, voffset=0, cursesoptions=0):
 def print_profiles(move):
     global profiles_count, conn_count
     profiles_count = len([i for i in profiles if i[0] != '\t' and pattern.match(i)][topprof:])
-    
+
     pntr = 0
     for prof in [i for i in profiles if i[0] != '\t' and pattern.match(i)][topprof:]:
         if pntr + 3 == bottom:
@@ -585,7 +582,7 @@ def print_profiles(move):
         if pntr == highlstr:
             if '\t' in prof:
                 profname, conndetails = prof.split('\t')[:2]   # Only first two parts are valuable, anything else can be dropped
-                conndetails = hide_password(conndetails)
+                conndetails = hide_sensitive(conndetails)
                 scr.addstr(pntr, 0, profname, curses.A_BOLD)
                 scr.addstr(pntr, len(profname) + 4, conndetails, curses.A_DIM + curses.A_ITALIC)
             else:
@@ -597,7 +594,7 @@ def print_profiles(move):
                 if not i.startswith('\t'): break
                 conn_list.append(i)
             conn_count = len(conn_list)
-            
+
             for counter, i in enumerate(conn_list[topconn:]):
                 if counter == max_displayed:
                     break
@@ -611,7 +608,7 @@ def print_profiles(move):
                     return
                 pntr += 1
                 params = conn.split('\t')[-1]
-                conn = conn.replace(params, hide_password(params))
+                conn = conn.replace(params, hide_sensitive(params))
                 if conn.startswith('\t...'):
                     scr.addstr(pntr, 0, conn, curses.A_DIM + curses.A_ITALIC)
                     continue
@@ -641,7 +638,7 @@ def proc_handler(cmd, args, waitfor=None):
     if pid == 0:
         os.execvp(cmd, args)
     elif pid > 0:
-        threading.Thread(target=__proc_watcher, args=[fd, pid, waitfor, (True if '-L' in args else False)], daemon=True).start()
+        threading.Thread(target=__proc_watcher, args=[fd, pid, waitfor, ('-L' in args)], daemon=True).start()
         tailing_print()
 
 # The second part is only related to the tunnel's monitoring, as its just convinient to create a tunnel with a few keystrokes
@@ -650,7 +647,7 @@ def __proc_watcher(fd, pid, waitfor, tunnel):
     while not (tunnel and not waitfor):
         try:
             out = os.read(fd, 1024)
-        except (OSError):
+        except OSError:
             wrt(f'{pid} has *probably* finished its execution, as os.read() raised an exception on processe\'s FD')
             return
         wrt(f'[PID - {pid}] ' + out.decode())
@@ -670,7 +667,7 @@ def __proc_watcher(fd, pid, waitfor, tunnel):
         try:
             if tunnels[tunid][2].startswith('to be'):       # user request for tunnel to be either killed or restarted
                 os.kill(pid, 9)
-                for i in range(5):
+                for _ in range(5):
                     os.kill(pid, 0)
                     sleep(0.5)
                 wrt(f'[PID - {pid}] is still alive for the past 10 seconds after sending SIGKILL')
@@ -684,7 +681,7 @@ def __proc_watcher(fd, pid, waitfor, tunnel):
                 sock.close()
 
         except ProcessLookupError:
-            
+
             if tunnels[tunid][2].startswith('to be'):
                 wrt(f'[PID - {pid}] was killed by request')
 
@@ -696,10 +693,10 @@ def __proc_watcher(fd, pid, waitfor, tunnel):
                     wrt(f'\nRestarting a tunnel with the following command:\nssh {' '.join(params[0])}')
                     proc_handler('ssh', *params)
                 tunnels.pop(tunid)
-            
+
             else:
                 tunnels[tunid][2] = 'killed'
-        
+
         except Exception as exc:
             tunnels[tunid][2] = str(exc.args)
 
@@ -722,7 +719,7 @@ def redraw(move=None, breakout=True):
     global pos, highlstr, topconn
     if move is not None:
         if nested:
-            
+
             shown = range(2 if topconn else 1, max_displayed + (0 if topconn + max_displayed < conn_count else 1))
             if conn_count < max_displayed: shown = shown[:conn_count]
 
@@ -734,22 +731,22 @@ def redraw(move=None, breakout=True):
                     topconn = conn_count - len(shown) - (1 if conn_count > max_displayed else 0)
                     pos = conn_count + move
                     move += max(shown) + (1 if conn_count > max_displayed else 0)
- 
+
             else:
                 if move - topconn > max(shown):         # if requested move in the profile's range, but not on the screen
                     topconn += (move - topconn) - shown[-1]
                 if move - topconn < min(shown):
                     topconn -= shown[0] - (move - topconn)
-                    if topconn < 0: topconn = 0
+                    topconn = max(topconn, 0)
                 pos = move
                 move -= topconn
             move += highlstr
-        
+
         else:
             highlstr = move
     else:
         move = pos + highlstr - topconn if nested else highlstr
-    
+
     scr.erase()
     print_profiles(move)
     scr.addstr(bottom - 2, 4, f'Sort by {sort}.*   Copied details: {copied_details}')
@@ -809,9 +806,8 @@ def __continuous_print():
                 sleep(0.01)
                 continue
             yield line
-        else:
-            l.close()
-            return
+        l.close()
+        return
 
     lucorner = len('\t'.join(profiles[resolve('conn')].split('\t')[:3]).expandtabs().rstrip()) + tabsize
     if not nested:
@@ -918,7 +914,7 @@ def unique_name(name):
             actualname = re.sub(r'\d+$', lambda num: str(int(num.group()) + 1).zfill(2), actualname)
         else:
             actualname += '_00'
-        
+
         if '\t' in name:
             name = '\t'.join([actualname] + name.split('\t')[1:])
             continue
@@ -956,7 +952,7 @@ class Textbox_enhanced(Textbox):
             tabbed_line = line[:x] + b' ' * (curs_offset - x) + line[x:].strip()
             self.win.addstr(y, 0, tabbed_line)
             self.win.move(y, curs_offset)
-        
+
         elif ch == 23:                                         # ^w
             regular_char_seen = False
             for i in range(1, 100):
@@ -1013,7 +1009,7 @@ class Textbox_enhanced(Textbox):
                 pass
             elif self.stripspaces:
                 self.win.move(y-1, self._end_of_line(y-1))
-            
+
             else:
                 self.win.move(y-1, self.maxx)
             if ch in (curses.ascii.BS, curses.KEY_BACKSPACE, curses.ascii.DEL):
@@ -1025,7 +1021,7 @@ class Textbox_enhanced(Textbox):
                         self.win.delch(y, x - i)
                 else:
                     self.win.delch()
-        
+
         elif ch == curses.ascii.EOT:                           # ^d
             return 0
         elif ch == curses.ascii.ENQ:                           # ^e
@@ -1067,7 +1063,7 @@ class Textbox_enhanced(Textbox):
                 if x > self._end_of_line(y-1):
                     self.win.move(y-1, self._end_of_line(y-1))
         return 1
-    
+
     def edit(self, validate=None):
         "Edit in the widget window and collect the results."
         while 1:
@@ -1138,7 +1134,7 @@ mainfile = cfg['file_path']
 
 if os.path.isfile(mainfile):
     filetype = os.popen(f'file --mime-type -b {mainfile}').read()
-    
+
     if 'pgp-encrypted' in filetype:
         key = keyring.get_password(mainfile + '_' + str(os.stat(mainfile).st_ino), os.getlogin())
         if key:
@@ -1153,8 +1149,7 @@ if os.path.isfile(mainfile):
                 profiles = decrypt(mainfile, key)
                 if profiles:
                     break
-                else:
-                    key = getpass('Sorry, try again: ')
+                key = getpass('Sorry, try again: ')
             if not profiles:
                 exit()
 
@@ -1196,7 +1191,7 @@ if threading.active_count() > 2:
 if msgq:    # offset for startup information if there is any
     msgq = ['\n\n'] + msgq
 
-while True: 
+while True:
     nodetails = False
     tab_completion = False
     if msgq:
@@ -1205,13 +1200,13 @@ while True:
             redraw(breakout=False)
         print_message(msgq, offset=tabsize * (3 if not nested else 1))
         msgq = []
-    keypress = scr.getch() 
+    keypress = scr.getch()
     if 'print' in str(threading.enumerate()):
         stop_print.set()
         [th for th in threading.enumerate() if 'print' in th.name][0].join()
     if profiles_count == 0 and keypress in [258, 259, 260, 261]:
         continue
-    
+
     try:
         match keypress:
 
@@ -1221,10 +1216,10 @@ while True:
                 exceed = 0
                 if nested:
                     redraw(pos + 1)
-                
+
                 if highlstr + 1 == profiles_count:
                     redraw(0)
-                
+
                 for index, value in enumerate(profiles[resolve('prof') + conn_count + 2:]):
                     if not value.startswith('\t') or index == max_displayed:
                         break
@@ -1245,7 +1240,7 @@ while True:
                     if topprof != 0:
                         topprof -= 1
                         redraw(0)
-                    
+
                     if profiles_count + 1 > bottom - 3:
                         for index, value in enumerate(reversed(profiles)):
                             if not value.startswith('\t') or index == max_displayed:
@@ -1254,7 +1249,7 @@ while True:
                         topprof += profiles_count - bottom + 3 + exceed
                         redraw(bottom - 3 - exceed - 1)
                     redraw(profiles_count - 1)
-                
+
                 for index, value in enumerate(reversed(profiles[:resolve('prof')])):
                     if not value.startswith('\t') or index == max_displayed:
                         break
@@ -1262,7 +1257,7 @@ while True:
                         exceed += 1
                 topprof += exceed
                 redraw(highlstr - 1 - exceed)
-            
+
             case 260:   # arrow left - ←
                 if nested:
                     if pos in picked_cons:
@@ -1273,7 +1268,7 @@ while True:
                     topconn = 0
                     pos = 0
                     redraw(highlstr)
-                
+
                 if highlstr == 0 and topprof != 0: topprof = 0
                 redraw(0)
 
@@ -1331,7 +1326,7 @@ while True:
                     selected = list(range(pos, conn_count + 1)) if keypress == 336 else list(range(pos, 0, -1))
                     for i in selected:
                         if not profiles[resolve('prof') + i].startswith('\t#'):
-                           filtered.append(i)
+                            filtered.append(i)
                         if len(filtered) == cfg['select_multiplier']:
                             break
                     picked_cons.update(filtered)
@@ -1379,7 +1374,7 @@ while True:
                 if pos == 1:
                     redraw(conn_count)
                 redraw(pos - 1)
-             
+
             case 569:   # Ctrl-→ for revealing the set of commands, that will be used for connection
                 if not nested:
                     continue
@@ -1391,7 +1386,7 @@ while True:
                 nodetails = True
                 redraw(breakout=False)
                 print_message(cmds)
-           
+
             case 1:         # Ctrl+A - Select all hosts from the profile
                 if nested:
                     profindex = resolve('prof')
@@ -1399,7 +1394,7 @@ while True:
                         if not profiles[profindex + num].strip().startswith('#'):
                             picked_cons.add(num)
                     redraw()
-            
+
             case 16:        # Ctrl+P - Create a continuously updating window with the log file contents in it
                 nodetails = True
                 tailing_print()
@@ -1412,7 +1407,7 @@ while True:
                 if nested:
                     replace_line = resolve('conn')
                 editline = profiles[replace_line][:-1]
-                
+
                 lasttab = 0
                 incr = 0
                 for ind, char in enumerate(editline, 1):
@@ -1441,7 +1436,7 @@ while True:
                         sort += char.lower()
                     redraw(0)
                 redraw()
-            
+
             case 14:    # Ctrl+N for adding new profiles and servers
                 if nested:
                     profiles[resolve('conn') + 1:resolve('conn') + 1] = ['\tnew\t10.100.0.0\n']
@@ -1451,7 +1446,7 @@ while True:
                         highlstr -= 1
                     conn_count += 1
                     if (pos - topconn) + 1 >= max_displayed + 1:    # calling redraw() without arguments avoids adjusting of
-                        topconn += 1; pos += 1; redraw()            # pos and topconn variables, for which it is an edge case 
+                        topconn += 1; pos += 1; redraw()            # pos and topconn variables, for which it is an edge case
                     redraw(pos + 1)
 
                 profname = sort.lower() + '_' + cfg['new_profile'][0].strip()
@@ -1488,7 +1483,7 @@ while True:
                     redraw(redrawpoint)
 
                 remove_start_point = resolve('prof')
-                remove_end_point = 0 
+                remove_end_point = 0
                 for index, value in enumerate(profiles[remove_start_point + 1:], 1):
                     if value[0] != '\t':
                         remove_end_point = remove_start_point + index
@@ -1522,7 +1517,7 @@ while True:
                     highlstr -= 1
                 conn_count += 1
                 if (pos - topconn) + 1 >= max_displayed + 1:    # calling redraw() without arguments avoids adjusting of
-                    topconn += 1; pos += 1; redraw()        # pos and topconn variables, for which it is an edge case 
+                    topconn += 1; pos += 1; redraw()        # pos and topconn variables, for which it is an edge case
                 redraw(pos + 1)
 
 
@@ -1587,7 +1582,7 @@ while True:
                         pane = win.select_pane(0)
                     else:
                         pane = win.split()
-                   
+
                     threading.Thread(target=create_connection, args=[pane,conn]).start()
 
                 try:
@@ -1598,13 +1593,13 @@ while True:
                 redraw()
 
 
-            case 21:        # Ctrl+U - Upload(?) a profile from file (only IPs) 
+            case 21:        # Ctrl+U - Upload(?) a profile from file (only IPs)
                 filename = autocomplete_loop('File to take IPs from - ', cfg['import_path'])
                 try:
                     file = open(filename)
                     ips = sorted(set(re.findall(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}', file.read())))
                 except Exception:
-                    print_message(f'Could not open or read given file')
+                    print_message('Could not open or read given file')
                     file.close()
                     continue
 
@@ -1626,7 +1621,7 @@ while True:
                 profiles = newprof + profiles
                 file.close()
                 reset()
-            
+
             case 12:        # Ctrl+L - Create a background process for tunneling
                 if not nested:
                     if not tunnels:
@@ -1652,10 +1647,10 @@ while True:
                         print_message(f"Chosen tunnel - {'[' + tun_choice[0] + ']' + ' -> ' + tun_choice[2]}")
                     else:
                         tun_choice = list(tunnels.values())[0]
-                        print_message(f'The only installed tunnel is - {'[' + tun_choice[0] + ']' + ' -> ' + tun_choice[2]}')    
+                        print_message(f'The only installed tunnel is - {'[' + tun_choice[0] + ']' + ' -> ' + tun_choice[2]}')
                     print_message('Action to take (kill or restart) [k/r] - ', voffset=1)
                     action = scr.getkey()
-                    
+
                     if action.lower() == 'k':
                         tun_choice[2] = 'to be killed'
                         tailing_print()
@@ -1692,7 +1687,7 @@ while True:
                         finally:
                             s.close()
                     print_message('pre-inserted value is taken from the config file and incremented until an opened port is met', voffset=1, cursesoptions=curses.A_DIM)
-                sport = accept_input(message=f'Source port (empty for random) - ', preinput=str(srcport))
+                sport = accept_input(message='Source port (empty for random) - ', preinput=str(srcport))
                 if sport:
                     if not sport.isdigit():
                         print_message('Entered value is not a number')
@@ -1701,13 +1696,13 @@ while True:
                     if sport > 65535:
                         print_message('Entered port out of range of available ports')
                         continue
-                else: 
+                else:
                     s = socket.socket()
                     s.bind(('', 0))
                     sport = sock.getsockname()[1]
 
                 print_message(f'Source port - {sport}')
-                dport = accept_input(message=f'Destination port - ', preinput=cfg["dst_tunnel_port"], voffset=1)
+                dport = accept_input(message='Destination port - ', preinput=cfg["dst_tunnel_port"], voffset=1)
                 if not dport.isdigit():
                     print_message('Entered value is not a number')
                     continue
@@ -1715,7 +1710,7 @@ while True:
                 if dport > 65535:
                     print_message('Entered port out of range of available ports')
                     continue
-                
+
                 targethost = '127.0.0.1'
                 if 'ssh ' in hp['afterwards'] and re.search(r'ssh ([\.\w]+)', hp['afterwards']):
                     optionaltarget = re.search(r'ssh ([\.\w]+)', hp['afterwards']).group(1)
@@ -1770,7 +1765,7 @@ while True:
                 if action == 'to':
                     filename = autocomplete_loop('Enter a filename to be uploaded to host - ', cfg['upload_to_path'])
                 else:
-                    filename = accept_input(message='Enter a filename to be uploaded from host - ', preinput=cfg[f'upload_from_path'])
+                    filename = accept_input(message='Enter a filename to be uploaded from host - ', preinput=cfg['upload_from_path'])
 
                 if option == 1:
                     src, dst = filename, f'{hp["user"]}@{hp["address"]}:'
@@ -1813,7 +1808,7 @@ while True:
                     reset()
                 else:
                     continue
-        
+
     except curses.error:
         try:
             reset()

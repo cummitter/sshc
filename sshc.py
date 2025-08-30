@@ -22,12 +22,14 @@ from secrets import token_urlsafe
 
 alt_pressed = focused = nodetails = tab_completion = False
 nested = highlstr = topprof = topconn = pos = conn_count = 0
-copied_details = sort = ''
+copied_details = sort = file_selection = unprompted_file = ''
 tunnels = {}
 changes = []
 redo_changes = []
 buffer_changes = []
 msgq = []
+upload_to_history = []
+upload_from_history = []
 picked_cons = set()
 pattern = re.compile(rf'^{sort}.*|.*\| *{sort}.*', re.I)
 gpg = GPG()
@@ -241,7 +243,7 @@ def deinitialize_scr(noexit=False):
     exit(0)
 
 def hide_sensitive(params):
-    params = re.sub(r"(wf (\d+)? ?'.*' then )'.*'", r"\g<1>'******'", params)
+    params = re.sub(r"(wf \d* ?'.*?' then )'.*?'", r"\g<1>'******'", params)
     params = re.sub(r"(pass )[^ ]*", r"\g<1>******", params)
     params = re.sub(r'^!?([^ ]+/)[^ ]+', r"\g<1>******", params)
     return params
@@ -306,17 +308,22 @@ def macros(signal, frame):
 
 
 def monitor_process(proc):
-    while proc.poll() is None:
-        sleep(0.001)
-        continue
+    rc = proc.wait()
     stdout = proc.stdout.read().decode().strip()
-    if proc.returncode != 0:
-        msgq.append(f'Execution of "{extcmd}" as part of "{name}" template has returned a non-zero error code and the following came to the stderr:\n{res.stderr}')
-    elif stdout == 0:
-        msgq.append(f'Execution of "{extcmd}" as part of "{name}" template was successful but nothing came to stdout')
+    stderr = proc.stderr.read().decode().strip()
     cmd = ' '.join(proc.args)
+    templ = []
     for name, commands in cfg['templ_list'].items():
-        cfg['templ_list'][name] = commands.replace(f'#{{{cmd}}}', stdout)
+        if cmd in commands:
+            templ.append(name)
+            cfg['templ_list'][name] = commands.replace(f'#{{{cmd}}}', stdout)
+    templ = ' and '.join(templ)
+
+    if rc != 0:
+        msgq.append(f'Execution of "{cmd}" as part of "{templ}" template has returned a non-zero ({rc}) return code and the following came to the stderr:\n{stderr}\n'\
+                + 'stdout was empty' if not stdout else 'but the stdout was not empty:\n{stdout}')
+    elif not stdout:
+        msgq.append(f'Execution of "{cmd}" as part of "{templ}" template was successful but nothing came to stdout')
 
 # Function is called both for creating a menu in an active pane and as a handler for creating new pane and "populating" it with keys
 # This is required by the fact, that some keys' sending has to be precieved by returned characters, which implementation
@@ -953,6 +960,31 @@ class Textbox_enhanced(Textbox):
             self.win.addstr(y, 0, tabbed_line)
             self.win.move(y, curs_offset)
 
+        elif ch in (258, 259) and file_selection:
+            global unprompted_file
+            direction = 'forth' if ch == 258 else 'back'
+            upload_history = upload_from_history if file_selection == 'from' else upload_to_history
+            cursor_pos = self.win.getyx()[1]
+            written = self.win.instr(0, 0).decode().strip()
+            overwrite = ''
+            if not unprompted_file:
+                unprompted_file = written
+
+            if upload_history:
+                if written in upload_history:
+                    if upload_history.index(written) == (len(upload_history) - 1 if direction == 'forth' else 0):
+                        overwrite = unprompted_file
+                    else:
+                        overwrite = upload_history[upload_history.index(written) + (1 if direction == 'forth' else -1)]
+                else:
+                    overwrite = upload_history[0 if direction == 'forth' else -1]
+
+            if overwrite:
+                self.win.erase()
+                self.win.addstr(overwrite)
+            else:
+                self.win.move(0, cursor_pos)
+
         elif ch == 23:                                         # ^w
             regular_char_seen = False
             for i in range(1, 100):
@@ -1194,6 +1226,8 @@ if msgq:    # offset for startup information if there is any
 while True:
     nodetails = False
     tab_completion = False
+    file_selection = ''
+    unprompted_file = ''
     if msgq:
         if len(msgq) > 1:
             nodetails = True
@@ -1699,7 +1733,7 @@ while True:
                 else:
                     s = socket.socket()
                     s.bind(('', 0))
-                    sport = sock.getsockname()[1]
+                    sport = s.getsockname()[1]
 
                 print_message(f'Source port - {sport}')
                 dport = accept_input(message='Destination port - ', preinput=cfg["dst_tunnel_port"], voffset=1)
@@ -1746,6 +1780,7 @@ while True:
                 action = 'to'
                 if keypress == 6:
                     action = 'from'
+                file_selection = action
 
                 try:
                     custom_opts = sorted(os.listdir(cfg[f'{action}_scripts_path']))
@@ -1783,6 +1818,10 @@ while True:
                     subprocess.Popen([cfg[f'{action}_scripts_path'] + custom_opts[option - 2], hp['address'],
                                   str(hp['port']), str(hp['key']), f'"{hp["pass"]}"', str(hp["user"]), str(filename)], stdout=log, stderr=log)
                 tailing_print()
+                if action == 'from':
+                    upload_from_history.append(filename)
+                    continue
+                upload_to_history.append(filename)
 
 
         # [Sorting string manipulation]

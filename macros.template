@@ -1,0 +1,27 @@
+# This file provides examples for setting up macroses, which will appear in the active pane as a menu (with an ability to build nested menus)
+# "Macros" here mostly means an easy way to paste a long list of characters into the terminal, including control characters
+# The only way to invoke the menu is by sending -USR2 signal to the program, which can be bound to a shortcut inside tmux
+
+# here is an example of the simple macros that will only send a bunch of characters with and without linebreak
+first_menu_item: Just a long sequence of characters that could be a routinely used long command, which would be either longer to type or copy/paste from somewhere else
+second_menu_item: echo "There could be a command, that i am sure will not break anything, so there will be a linebreak right after" \n
+
+# And here is the syntax for defining submenus:
+nested_menu(
+        first_nested_item: I am a specific macros put under its own category
+        second_nested_item: Me either
+
+        twice_nested_menu(
+                first_twice_nested_item: Well okay, even i rarely go that deep
+                second_twice_nested_item: But it still useful and works!
+        )
+)
+
+# If you wish to send control characters right after sending "regular" characters, it must follow this syntax
+# this is mostly useful to build a preset for a command, but you need the cursor to be in a specific place, since it will be at the end otherwise
+
+special_item: The cursor for this command will be moved here despite in all other examples it was at the end --- C-Left x10 Left
+
+# After the end of the all characters to send, there must be a space, three dashes and another space, after which you can specify control characters
+# The format of those charachters is the same as you would specify them using "tmux send-keys -t", with the only improvement being the ability
+# to specify the count of those signals to send. So in the example above, Ctrl-Left was sent 10 times (moves cursor one word to the left) and the regular Left only once

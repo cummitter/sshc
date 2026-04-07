@@ -1,7 +1,6 @@
 #!/usr/bin/python
 
 import curses
-import keyring
 import os
 import re
 import signal
@@ -13,7 +12,6 @@ import warnings
 import sys
 from copy import deepcopy
 from getpass import getpass
-from gnupg import GPG
 from curses.textpad import Textbox
 from time import sleep, time
 from secrets import token_urlsafe
@@ -31,7 +29,6 @@ upload_to_history = []
 upload_from_history = []
 picked_cons = set()
 pattern = re.compile(rf'^{sort}.*|.*\| *{sort}.*', re.I)
-gpg = GPG()
 stop_print = threading.Event()
 lock = threading.Lock()
 tabsize = curses.get_tabsize()
@@ -408,45 +405,51 @@ def normalexit(signal, frame):
         nodetails = False
         curses.curs_set(0)
         redraw()
+
     if profs_hash == hash(str(profiles)):
         deinitialize_scr()
     
     sort_profiles()
-    if not os.path.isfile(mainfile):    # By default encrypt newly created files
-        open(mainfile, 'a').close()
-        key = token_urlsafe(64)
-        keyring.set_password(mainfile + '_' + str(os.stat(mainfile).st_ino), os.getlogin(), key)
+    encrypt = True
+    if not os.path.isfile(mainfile):    # File does not exist, try to encrypt by default
+        if KEYRING and GNUPG:
+            key = token_urlsafe(64)
+            keyring.set_password(mainfile, os.getlogin(), key)
 
-    elif 'plain' in filetype:
-        if not cfg['never_ask_for_encryption']:
+    elif 'plain' in filetype:           # File does exist, but for some reason in plain text, offer encryption
+        if not cfg['never_ask_for_encryption'] and GNUPG:
             deinitialize_scr(noexit=True)
             option = input("Would you like to encrypt the file? (y - generate passphrase and save it to local keyring, n - don't encrypt, m - manually specified passphrase): ").lower()
 
             if option == 'y':
-                key = token_urlsafe(64)
-                keyring.set_password(mainfile + '_' + str(os.stat(mainfile).st_ino), os.getlogin(), key)
-                gpg.encrypt(''.join(profiles), recipients=None, symmetric=True, passphrase=key, output=mainfile)
-                exit(0)
+                if KEYRING:
+                    key = token_urlsafe(64)
+                    keyring.set_password(mainfile, os.getlogin(), key)
+                else:
+                    print('This option is not available, as the python3-keyring module is missing')
 
             elif option == 'm':
                 key = getpass('Enter the passphrase: ')
-                keyring.set_password(mainfile + '_' + str(os.stat(mainfile).st_ino), os.getlogin(), key)
-                gpg.encrypt(''.join(profiles), recipients=None, symmetric=True, passphrase=key, output=mainfile)
-                exit(0)
+                keyring.set_password(mainfile, os.getlogin(), key)
 
             elif option == 'n':
+                encrypt = False
                 pass
 
             else:
                 print('Unrecognized option was entered, file will be saved in plain text')
+                encrypt = False
 
+    if encrypt:
+        gpg.encrypt(''.join(profiles), recipients=None, symmetric=True, passphrase=key, output=mainfile)
+    else:
         with open(mainfile, 'w') as f:
             for line in profiles:
                 f.write(line)
-
-    gpg.encrypt(''.join(profiles), recipients=None, symmetric=True, passphrase=key, output=mainfile)
-    deinitialize_scr()
-
+    try:
+        deinitialize_scr()
+    except:
+        exit()
 
 def parse_config():
     try:
@@ -921,7 +924,7 @@ def redo():
         print_message('No changes were undone for this profile, nothing to redo')
         return
     if not nested and len(redo_changes['outer']) == 0:
-        print_message("No changes were undone to the profiles' scope, nothing to redo")
+        print_message("No changes were undone to the profiles' scope, nothing to undo")
         return
 
     change = redo_changes[prof_name].pop()
@@ -1201,6 +1204,25 @@ userdir = os.path.expanduser('~') + '/.sshc'
 if not os.path.isdir(userdir):
     os.mkdir(userdir)
 
+if sys.prefix == sys.base_prefix and os.path.isdir(userdir + '/venv/lib'):
+    for i in os.listdir(userdir + '/venv/lib'):
+        if i.startswith('python'):
+            sys.path.insert(0, f'{userdir}/venv/lib/{i}/site-packages/')
+            msgq.append(f'Added {userdir}/venv/lib/{i}/site-packages/ to the path to search for modules')
+try:
+    import keyring
+    KEYRING = 1
+except ModuleNotFoundError:
+    KEYRING = 0
+    msgq.append('keyring module is not installed niether globally nor in a virtual environment')
+try:
+    from gnupg import GPG
+    GNUPG = 1
+    gpg = GPG()
+except ModuleNotFoundError:
+    GNUPG = 0
+    msgq.append('keyring module is not installed niether globally nor in a virtual environment')
+
 cfg = {
     'file_path': f'{userdir}/profiles',
     'never_ask_for_encryption': 0,
@@ -1235,19 +1257,28 @@ parse_config()
 
 mainfile = cfg['file_path']
 
+profiles = []
 if os.path.isfile(mainfile):
     filetype = os.popen(f'file --mime-type -b {mainfile}').read()
 
     if 'pgp-encrypted' in filetype:
-        key = keyring.get_password(mainfile + '_' + str(os.stat(mainfile).st_ino), os.getlogin())
-        if key:
-            profiles = decrypt(mainfile, key)
-            if not profiles:
-                exit('Profiles file is encrypted and there is a passphrase associated with the file found in keyring, but it doesn\'t decrypt the file')
-
+        
+        if not GNUPG:
+            exit('Profiles file is encrypted but python3-gnupg is not installed')
+        
+        if KEYRING:
+            key = keyring.get_password(mainfile, os.getlogin())
+            if key:
+                profiles = decrypt(mainfile, key)
+                if not profiles:
+                    exit('Profiles file is encrypted and there is a passphrase associated with the file found in keyring, but it does not decrypt the file')
+            else:
+                print('Profiles file is encrypted, but there is no passphrase in the keyring to decrypt it')
         else:
-            key = getpass('Profiles file is encrypted, but there is no passphrase in the keyring to decrypt it\n' \
-                          'You can enter password manually, it will be used for encrypting file after you done with the program: ')
+            print('Profiles file is encrypted, but python3-keyring is not installed')
+
+        if not profiles:
+            key = getpass('You can enter password manually, it will be used for encrypting file after you done with the program: ')
             for i in range(3):
                 profiles = decrypt(mainfile, key)
                 if profiles:
@@ -1259,6 +1290,10 @@ if os.path.isfile(mainfile):
     elif 'plain' in filetype:
         with open(mainfile, 'r') as f:
             profiles = f.readlines()
+
+    elif 'empty' in filetype:
+        profiles = cfg['new_profile']
+
     else:
         exit('Profiles file is not in a plain text, nor considered to be pgp-encrypted according to the "file" utility')
 

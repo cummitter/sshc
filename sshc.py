@@ -9,6 +9,7 @@ import subprocess
 import threading
 import traceback
 import warnings
+import shutil
 import sys
 from copy import deepcopy
 from getpass import getpass
@@ -226,6 +227,7 @@ def decrypt(file, passphrase=None):
         exit(f'{file} file can not be opened')
 
 def deinitialize_scr(noexit=False):
+    os.remove(cfg['pidfile_path'] + '/pid')
     scr.keypad(0)
     curses.echo()
     curses.nocbreak()
@@ -350,7 +352,9 @@ def neighbors(signal, frame):
                 exclcount += 1
                 if i != 48:
                     tmcmd += "'' '' '' "
-            tmcmd += f'"{"\t".join(conn[:min(len(conn), 2)]).expandtabs()}" {chr(i)} {{set-environment neighbor {chr(i)}; run-shell "kill -s 29 {pid}"}} '
+            #tmcmd += f'"{"\t".join(conn[:min(len(conn), 2)]).expandtabs()}" {chr(i)} {{set-environment neighbor {chr(i)}; run-shell "kill -s 29 {pid}"}} '
+            tmcmd += '"' + (conn[0] + '\t' + conn[1]).expandtabs() + '" ' + f'{chr(i)} {{set-environment neighbor {chr(i)}; run-shell "kill -s 29 {pid}"}} '
+        wrt(tmcmd)
         tmux_exec(tmcmd)
         return 0
 
@@ -374,6 +378,9 @@ def neighbors(signal, frame):
                     display-message -c {client} -d 3000 "Could not parse chosen host configuration"')
 
 def tmux_exec(cmd, output=0):
+    if tmux.poll() is not None:
+        if not start_tmux():
+            raise AssertionError
     lock.acquire()
     if cmd.startswith('capture'):
         os.set_blocking(tmux.stdout.name, False)
@@ -455,7 +462,7 @@ def parse_config():
     try:
         config_file = open(f'{userdir}/config')
     except OSError:
-        msgq.append('Configuration file is missing or have insufficient priviligies to open, please refer to ~/.sshc/config.template')
+        msgq.append('Configuration file is missing or have insufficient priviligies to open, please refer to {userdir}config.template')
         return
 
     lines = [l for l in config_file.readlines() if not l.startswith('#') and l != '\n']
@@ -711,7 +718,7 @@ def __proc_watcher(fd, pid, waitfor, tunnel):
                     tunnels[newtunid] = tunnels[tunid]
                     tunnels[newtunid][2] = 'starting'
                     tailing_print()
-                    wrt(f'\nRestarting a tunnel with the following command:\nssh {' '.join(params[0])}')
+                    wrt(f'\nRestarting a tunnel with the following command:\nssh {" ".join(params[0])}')
                     proc_handler('ssh', *params)
                 tunnels.pop(tunid)
 
@@ -835,6 +842,15 @@ def save_changes(action, location=None, value=None):
         else:
             undo_changes['outer'].append({'action': 'i', 'value': value})
 
+def start_tmux():
+    global tmux
+    if shutil.which('tmux'):
+        tmux = subprocess.Popen(['tmux', '-C', 'new-session', '-A', '-s', cfg['session_name']], bufsize=1, text=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        tmux_exec('refresh-client -f no-output')
+        return True
+    return False
+
+
 def sort_profiles():
     global profiles
     sorted_prof = [prof for prof in profiles if prof[0] != '\t']
@@ -893,10 +909,11 @@ def __continuous_print(fd):
 
 def main_thread_handler(exc_type, exc_value, exc_traceback):
     deinitialize_scr(noexit=True)
-    print('Uncaught exception was raised, terminal should be returned to its original state')
-    print(traceback.print_tb(exc_traceback), traceback.print_exception(exc_value))
-    return
-
+    if exc_type == AssertionError:
+        print('Receieved a signal that is supposed to be for tmux interaction, but could not find tmux executable')
+    else:
+        print('Uncaught exception was raised, terminal should be returned to its original state')
+        print(traceback.print_tb(exc_traceback))
 
 def thread_handler(args):
     func = args.thread.name
@@ -953,7 +970,7 @@ def redo():
                         break
                     del profiles[location + 1]
                 del profiles[location]
-                msgq.append(f'Deleted {change["name"].replace("\n", " ").replace("\t", "  ")} profile and all of its contents')
+                msgq.append('Deleted ' + 'change["name"].replace("\n", " ").replace("\t", "  ")' + ' profile and all of its contents')
                 highlstr -= 1 if location - resolve('prof') < 0 else 0
 
         case 'i':
@@ -1020,7 +1037,7 @@ def undo(signal, frame):
                     redo['value'].append(i)
                     del profiles[location + 1]
                 del profiles[location]
-                msgq.append(f'Deleted {redo["value"][0].replace("\n", " ").replace("\t", "  ")} profile and all of its contents')
+                msgq.append('Deleted ' + redo["value"][0].replace("\n", " ").replace("\t", "  ") + 'profile and all of its contents')
                 highlstr -= 1 if location - resolve('prof') < 0 else 0
 
         case 'i':
@@ -1200,7 +1217,7 @@ signal.signal(signal.SIGTSTP, undo)
 threading.excepthook = thread_handler
 sys.excepthook = main_thread_handler
 
-userdir = os.path.expanduser('~') + '/.sshc'
+userdir = os.path.abspath(os.path.dirname(sys.argv[0])) + '/config'
 if not os.path.isdir(userdir):
     os.mkdir(userdir)
 
@@ -1209,19 +1226,28 @@ if sys.prefix == sys.base_prefix and os.path.isdir(userdir + '/venv/lib'):
         if i.startswith('python'):
             sys.path.insert(0, f'{userdir}/venv/lib/{i}/site-packages/')
             msgq.append(f'Added {userdir}/venv/lib/{i}/site-packages/ to the path to search for modules')
+
+KEYRING = 0
 try:
     import keyring
+    ringname = keyring.get_keyring().name
     KEYRING = 1
+    msgq.append(f'Initializied keyring using the following backend - {ringname}')
 except ModuleNotFoundError:
-    KEYRING = 0
-    msgq.append('keyring module is not installed niether globally nor in a virtual environment')
+    msgq.append('keyring module is not installed')
+except keyring.errors.InitError:
+    msgq.append('keyring module is installed, but failed to initialize')
+
+GNUPG = 0
 try:
     from gnupg import GPG
-    GNUPG = 1
-    gpg = GPG()
+    if shutil.which('gpg'):
+        gpg = GPG()
+        GNUPG = 1
+    else:
+        msgq.append('gnupg module is installed, but no gpg executable found')
 except ModuleNotFoundError:
-    GNUPG = 0
-    msgq.append('keyring module is not installed niether globally nor in a virtual environment')
+    msgq.append('gnupg module is not installed niether globally nor in a virtual environment')
 
 cfg = {
     'file_path': f'{userdir}/profiles',
@@ -1238,6 +1264,7 @@ cfg = {
     'session_name': 'managed_session',      # not described
     'wf_default': 'word:',                  # not desctibed
     'wf_lines': 3,                          # not desctibed
+    'pidfile_path': f'{userdir}',           # not desctibed
     'local_spacing': 0,
     'wf_timeout': 10,
     'select_multiplier': 4,
@@ -1254,6 +1281,9 @@ cfg = {
 }
 
 parse_config()
+
+with open(cfg['pidfile_path'] + '/pid', 'w') as pidfile:
+    pidfile.write(str(os.getpid()))
 
 mainfile = cfg['file_path']
 
@@ -1301,6 +1331,9 @@ else:
     profiles = cfg['new_profile']
     msgq.append('Profiles file was not found (which is normal during the first launch), the new one will be saved after exiting the program')
 
+if not start_tmux():
+    msgq.append('Unable to start a tmux control process, likely because tmux executable is missing')
+
 scr = curses.initscr()
 scr.keypad(True)
 curses.noecho()
@@ -1316,9 +1349,6 @@ profs_hash = hash(str(profiles))
 curses.curs_set(0)
 curses.meta(True)
 redraw(0, breakout=False)
-
-tmux = subprocess.Popen(['tmux', '-C', 'new-session', '-A', cfg['session_name']], bufsize=1, text=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
-tmux_exec('refresh-client -f no-output')
 
 if threading.active_count() > 1:
     print_message('The application is ready to work, but not all of the template substitution has finished executing')
@@ -1801,7 +1831,7 @@ while True:
                         print_message(f"Chosen tunnel - {'[' + tun_choice[0] + ']' + ' -> ' + tun_choice[2]}")
                     else:
                         tun_choice = list(tunnels.values())[0]
-                        print_message(f'The only installed tunnel is - {'[' + tun_choice[0] + ']' + ' -> ' + tun_choice[2]}')
+                        print_message(f'The only installed tunnel is - {"[" + tun_choice[0] + "]" + " -> " + tun_choice[2]}')
                     print_message('Action to take (kill or restart) [k/r]', voffset=1)
                     focused = True
                     action = scr.getkey()

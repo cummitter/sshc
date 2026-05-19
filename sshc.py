@@ -19,7 +19,7 @@ from secrets import token_urlsafe
 
 
 alt_pressed = focused = nodetails = tab_completion = False
-nested = highlstr = topprof = topconn = pos = conn_count = 0
+nested = highlstr = topprof = topconn = pos = conn_count = debug = 0
 copied_details = sort = file_selection = unprompted_file = ''
 tunnels = {}
 undo_changes = {'outer': []}
@@ -407,10 +407,11 @@ def __tmux_exec(cmd, output):
                     return (line if line != '\n' else '') + ''.join(filter(lambda x: x != '\n', [tmux.stdout.readline() for i in range(output - 1)]))
 
 def normalexit(signal, frame):
-    global profiles, key, focused, nodetails
+    global profiles, key, focused, nodetails, debug
     if focused:
         focused = False
         nodetails = False
+        debug = 0
         curses.curs_set(0)
         redraw()
 
@@ -1400,6 +1401,10 @@ while True:
     if keypress == curses.KEY_RESIZE:
         handle_resize()
         continue
+    if debug:
+        wrt(f'Number of pressed key - {keypress}')
+        continue
+
     if 'print' in str(threading.enumerate()):
         stop_print.set()
         [th for th in threading.enumerate() if 'print' in th.name][0].join()
@@ -1705,6 +1710,9 @@ while True:
 
             case 4 | 9:     # Ctrl+D | I for duplicating (connections only). I increases last octet and turns out that <TAB> is also Ctrl+I???
                 if not nested:
+                    focused = True
+                    debug = 1
+                    tailing_print()
                     continue
                 copy_point = resolve('conn')
                 copy = profiles[copy_point]

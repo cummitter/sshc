@@ -12,7 +12,7 @@ import warnings
 import shutil
 import sys
 from copy import deepcopy
-from getpass import getpass
+from getpass import getpass, getuser
 from curses.textpad import Textbox
 from time import sleep, time
 from secrets import token_urlsafe
@@ -47,6 +47,8 @@ def accept_input(message='', preinput='', start=None, voffset=0):
         start = len(conn.expandtabs().rstrip()) + tabsize + len(message)
         if nodetails:
             start = len('\t'.join(conn.split('\t')[:3]).expandtabs().rstrip()) + tabsize + len(message)
+            if not nested:
+                start = tabsize * (4 - len(profiles[resolve('conn')].expandtabs().rstrip()) // tabsize) + len(message)
     print_message(message, voffset=voffset)
     editwin = curses.newwin(1, curses.COLS - 2 - start, scr.getyx()[0] + voffset, start)
     editwin.addstr(preinput)
@@ -354,7 +356,6 @@ def neighbors(signal, frame):
                     tmcmd += "'' '' '' "
             #tmcmd += f'"{"\t".join(conn[:min(len(conn), 2)]).expandtabs()}" {chr(i)} {{set-environment neighbor {chr(i)}; run-shell "kill -s 29 {pid}"}} '
             tmcmd += '"' + (conn[0] + '\t' + conn[1]).expandtabs() + '" ' + f'{chr(i)} {{set-environment neighbor {chr(i)}; run-shell "kill -s 29 {pid}"}} '
-        wrt(tmcmd)
         tmux_exec(tmcmd)
         return 0
 
@@ -421,7 +422,7 @@ def normalexit(signal, frame):
     if not os.path.isfile(mainfile):    # File does not exist, try to encrypt by default
         if KEYRING and GNUPG:
             key = token_urlsafe(64)
-            keyring.set_password(mainfile, os.getlogin(), key)
+            keyring.set_password(mainfile, getuser(), key)
 
     elif 'plain' in filetype:           # File does exist, but for some reason in plain text, offer encryption
         if not cfg['never_ask_for_encryption'] and GNUPG:
@@ -431,13 +432,13 @@ def normalexit(signal, frame):
             if option == 'y':
                 if KEYRING:
                     key = token_urlsafe(64)
-                    keyring.set_password(mainfile, os.getlogin(), key)
+                    keyring.set_password(mainfile, getuser(), key)
                 else:
                     print('This option is not available, as the python3-keyring module is missing')
 
             elif option == 'm':
                 key = getpass('Enter the passphrase: ')
-                keyring.set_password(mainfile, os.getlogin(), key)
+                keyring.set_password(mainfile, getuser(), key)
 
             elif option == 'n':
                 encrypt = False
@@ -477,38 +478,53 @@ def parse_config():
             else:
                 msgq.append(f'Unknown parameter - {name}')
 
-    for key, value in tmpcfg.copy().items():
+    for key, value in tmpcfg.items():
         # numerical parameters
-        if key in ('never_ask_for_encryption', 'port', 'local_spacing', 'wf_timeout', 'select_multiplier', 'max_conn_displayed', 'src_tunnel_port', 'dst_tunnel_port') \
-            and not value.isdigit():
+        if key in ('never_ask_for_encryption', 'port', 'local_spacing', 'wf_timeout', 'select_multiplier', 'max_conn_displayed', 'src_tunnel_port', 'dst_tunnel_port'):
+            if key in ('src_tunnel_port', 'dst_tunnel_port') and ',' in value:
+                ports = []
+                invalids = []
+                for port in map(str.strip, value.split(',')):
+                    if port.isdigit():
+                        ports.append(port)
+                    else:
+                        invalids.append(port)
+                if invalids and ports:
+                    msgq.append(f'Some of the ports for {key} are not digits: {", ".join(invalids)}')
+                if not ports:
+                    msgq.append(f'All of the ports for {key} are not digits: {", ".join(invalids)}')
+                    continue
+                value = ports
+            elif not value.isdigit():
                 msgq.append(f'{key} was defined, but is not integer')
-                tmpcfg.pop(key)
+                continue
 
         # local paths
-        if key in ('file_path', 'logfile', 'upload_from_dest', 'keys_path', 'import_path', 'from_scripts_path', 'to_scripts_path', 'upload_to_path', 'upload_from_dest'):
+        if key in ('file_path', 'logfile', 'upload_from_dest', 'keys_path', 'from_scripts_path', 'to_scripts_path'):
             if value[0] not in ('~', '/'):
                 value = f'{userdir}/{value}'
+
             if key in ('file_path', 'logfile'):
+                if not os.path.exists(os.path.dirname(value)):
+                    msgq.append(f'{key} parameter was treated as {value} and the directory for this file does not exist')
+                    continue
                 if not os.path.isfile(value):
-                    msgq.append(f'{key} parameter was treated as {value} and there is no such file')
-                    tmpcfg.pop(key)
+                    msgq.append(f'{key} parameter was treated as {value} and there is no such file, but it will be created')
+                    cfg[key] = value
                     continue
-                if not os.access(value, os.R_OK):
-                    msgq.append(f'{key} parameter points to an existing file ({value}), but it can not be read from')
-                    tmpcfg.pop(key)
-                    continue
-                if not os.access(value, os.W_OK):
-                    msgq.append(f'{key} parameter points to an existing file ({value}), but it can not be written to')
-                    tmpcfg.pop(key)
-                    continue
+
             else:
                 if not os.path.isdir(value):
                     msgq.append(f'{key} parameter was treated as {value} and this directory does not exist')
-                    tmpcfg.pop(key)
                     continue
+            if not os.access(value, os.R_OK):
+                msgq.append(f'{key} parameter points to an existing file ({value}), but it can not be read from')
+                continue
+            if not os.access(value, os.W_OK):
+                msgq.append(f'{key} parameter points to an existing file ({value}), but it can not be written to')
+                continue
 
-    for key in tmpcfg:
-        cfg[key] = tmpcfg[key]
+        cfg[key] = value
 
 
     # Above was parsing and sanitization of generic parameters, below are two special ones
@@ -551,6 +567,8 @@ def print_message(text, offset=tabsize, voffset=0, cursesoptions=0):
     print_point = len(conn.expandtabs().rstrip()) + offset
     if nodetails:
         print_point = len('\t'.join(conn.split('\t')[:3]).expandtabs().rstrip()) + offset
+    if not nested:
+        print_point = len(conn.expandtabs().rstrip()) + (tabsize * (4 - len(conn.expandtabs().rstrip()) // tabsize))
     if isinstance(text, list):
         text = ' \n'.join(text)
 
@@ -726,9 +744,9 @@ def __proc_watcher(fd, pid, waitfor, tunnel):
                 tunnels[tunid][2] = 'exited'
 
         finally:
-            #if not tunnels.get(tunid):
-            #    break
-            if tunnels[tunid][2] != prev:
+            if not tunnels.get(tunid):
+                raise AssertionError('Deleted tunnel')
+            elif tunnels[tunid][2] != prev:
                 wrt('[' + tunnels[tunid][0] + ']' + ' -> ' + tunnels[tunid][2])
                 prev = tunnels[tunid][2]
                 if prev == 'exited':
@@ -740,7 +758,7 @@ def __proc_watcher(fd, pid, waitfor, tunnel):
                         except Exception:
                             break
                     wrt(f"The following output was captured:\n{message}")
-             #       break
+                    raise AssertionError('Exited tunnel')
 
 
 # An essential function, used both for rerendering the whole screen and handling all the movement in its vast complexity
@@ -896,7 +914,7 @@ def __continuous_print(fd):
 
     lucorner = len('\t'.join(profiles[resolve('conn')].split('\t')[:3]).expandtabs().rstrip()) + tabsize
     if not nested:
-        lucorner += tabsize
+        lucorner = len(profiles[resolve('conn')].expandtabs().rstrip()) + (tabsize * (4 - len(profiles[resolve('conn')].expandtabs().rstrip()) // tabsize))
     msgwin = curses.newwin(curses.LINES, curses.COLS - 10, scr.getyx()[0], lucorner)
     message = []
     for linenum, line in enumerate(tailf()):
@@ -926,9 +944,11 @@ def thread_handler(args):
     if 'thr_handler' in func:
         reason = 'in the forked process managing'
     if '__continuous_print' in func:
-        'during the procedure of continious log streaming'
+        reason = 'during the procedure of continious log streaming'
+    if '__proc_watcher' in func and args.exc_type is AssertionError:
+        return
 
-    wrt(func, args.exc_value)
+    wrt(traceback.format_exc())
     msgq.append(f'There was an unhandled error {reason}, see log for details')
 
 
@@ -1231,7 +1251,10 @@ KEYRING = 0
 try:
     import keyring
     ringname = keyring.get_keyring().name
-    KEYRING = 1
+    if ringname == 'fail Keyring':
+        msgq.append(f'keyring module is installed, but no suitable backend found')
+    else:
+        KEYRING = 1
     msgq.append(f'Initializied keyring using the following backend - {ringname}')
 except ModuleNotFoundError:
     msgq.append('keyring module is not installed')
@@ -1274,6 +1297,7 @@ cfg = {
     'upload_from_path': '',
     'upload_to_path': '',
     'upload_from_dest': os.path.expanduser('~'),
+    'upload_to_dest': '/tmp',                # not described and not implemented
     'src_tunnel_port': '',
     'dst_tunnel_port': '',
     'new_profile': ['New profile\n', '\tnew\t10.100.0.0\n'],
@@ -1297,7 +1321,7 @@ if os.path.isfile(mainfile):
             exit('Profiles file is encrypted but python3-gnupg is not installed')
         
         if KEYRING:
-            key = keyring.get_password(mainfile, os.getlogin())
+            key = keyring.get_password(mainfile, getuser())
             if key:
                 profiles = decrypt(mainfile, key)
                 if not profiles:
@@ -1370,7 +1394,7 @@ while True:
         if len(msgq) > 1:
             nodetails = True
             redraw(breakout=False)
-        print_message(msgq, offset=tabsize * (3 if not nested else 1))
+        print_message(msgq)
         msgq = []
     keypress = scr.getch()
     if keypress == curses.KEY_RESIZE:
@@ -1814,12 +1838,19 @@ while True:
                     nodetails = True
                     focused = True
                     redraw(breakout=False)
+                    
                     if len(tunnels) > 1:
                         tun_options = ''
                         for enum, value in enumerate(tunnels.values(), 1):
                             tun_options += str(enum) + ') [' + value[0] + ']' + ' -> ' + value[2] + '\n'
                         print_message(f'The list of tunnels the program keeps track of:\n{tun_options}')
-                        choice = accept_input(message = 'Enter a number of a tunnel to interact with - ', voffset=tun_options.count('\n') + 2)
+                        if len(tunnels) < 10:
+                            print_message('Enter a number of a tunnel to interact with', voffset=tun_options.count('\n') + 2)
+                            choice = scr.getkey()
+                            if choice == 'KEY_RESIZE':
+                                handle_resize()
+                        else:
+                            choice = accept_input(message = 'Enter a number of a tunnel to interact with - ', voffset=tun_options.count('\n') + 2)
                         if not choice.isdigit():
                             print_message('Entered value is not a number')
                             continue
@@ -1828,10 +1859,12 @@ while True:
                             print_message('No tunnel with such number')
                             continue
                         tun_choice = tunnels[list(tunnels.keys())[choice - 1]]
+                        redraw(breakout=False)
                         print_message(f"Chosen tunnel - {'[' + tun_choice[0] + ']' + ' -> ' + tun_choice[2]}")
                     else:
                         tun_choice = list(tunnels.values())[0]
                         print_message(f'The only installed tunnel is - {"[" + tun_choice[0] + "]" + " -> " + tun_choice[2]}')
+                    
                     print_message('Action to take (kill or restart) [k/r]', voffset=1)
                     focused = True
                     action = scr.getkey()
